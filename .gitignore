@@ -1,0 +1,54 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Build output
+dist/
+*.js
+*.js.map
+*.d.ts
+!src/types/*.d.ts
+
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# Database & Data
+data/*.sqlite
+data/*.sqlite3
+data/*.db
+*.log
+logs/
+
+# Blacklist & Sensitive Data
+data/blacklist.json
+!data/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PM2
+.pm2/
+ecosystem.config.js
+
+# Testing
+coverage/
+.nyc_output/
+
+# Misc
+*.tmp
+*.temp
+.cache/
