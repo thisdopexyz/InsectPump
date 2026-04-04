@@ -3,10 +3,14 @@ import { CONFIG, validateConfig } from './config/config';
 import { initDatabase, closeDatabase } from './database/sqlite';
 import { InangBase } from './database/inangBase';
 import { TradeBase } from './database/tradeBase';
+// Eye (new token) - ACTIVE
 import { Eye } from './discovery/eye';
+// EyeInsider disabled - using Eye for new token hunting
+// import { EyeInsider } from './discovery/EyeInsider';
 import { InangMonitor } from './monitoring/inangMonitor';
 import { PriceMonitor } from './monitoring/priceMonitor';
 import { TradeEngine } from './execution/tradeEngine';
+import { WalletManager } from './execution/walletManager';
 import { TelegramService } from './services/telegram';
 import { createModuleLogger } from './utils/logger';
 
@@ -14,14 +18,17 @@ const logger = createModuleLogger('Main');
 
 /**
 * Main Application Class - Wiring all components together
+* MODE: EyeInsider - Hunt insiders in $15K-$50K range
 */
 class InsectPumpBot {
 private inangBase: InangBase;
 private tradeBase: TradeBase;
-private eye: Eye;
+private eye: Eye;  // Active - new token hunting
+// private eyeInsider: EyeInsider;  // Disabled - $15K-$50K insider hunting
 private inangMonitor: InangMonitor;
 private priceMonitor: PriceMonitor;
 private tradeEngine: TradeEngine;
+private walletManager: WalletManager;
 private telegram: TelegramService;
 private dashboardInterval: NodeJS.Timeout | null = null;
 
@@ -35,11 +42,15 @@ private extendedBuyBlock: Map<string, { until: number; reason: string }> = new M
 private readonly EXTENDED_BLOCK_MS = CONFIG.EXTENDED_BLOCK_MS;
 private readonly BUY_FAIL_BLOCK_MS = CONFIG.BUY_FAIL_BLOCK_MS;
 
+// EXTRA SAFETY: Track in-flight buys to prevent race conditions (token being bought RIGHT NOW)
+private inFlightBuys: Set<string> = new Set(); // token addresses currently being bought
+
 constructor() {
 // Initialize all components
 this.inangBase = new InangBase();
 this.tradeBase = new TradeBase();
 this.tradeEngine = new TradeEngine();
+this.walletManager = new WalletManager(this.tradeBase);
 this.telegram = new TelegramService();
 
 this.inangMonitor = new InangMonitor(
@@ -52,7 +63,14 @@ CONFIG.PUMP_PORTAL_WSS || 'wss://pumpportal.fun/api/data',
 this.tradeBase
 );
 
-this.eye = new Eye(); // Assumes Eye takes necessary config internally
+// Eye (new token) - ACTIVE
+this.eye = new Eye();
+
+// EyeInsider (established $15K-$50K) - DISABLED
+// this.eyeInsider = new EyeInsider();
+
+// Setup Telegram command handlers
+this.setupTelegramCommands();
 }
 
 async start(): Promise<void> {
@@ -84,18 +102,23 @@ logger.info('[Main] PriceMonitor started');
 // (e.g., after bot restart with positions still open)
 await this.syncOpenTradesToPriceMonitor();
 
+// Start Eye (new token hunter)
 await this.eye.init();
-await this.eye.start();
-logger.info('[Main] Eye radar started - Scanning for quality traders...');
+this.eye.start();
+logger.info('[Main] 👁️ Eye started - Hunting new tokens with WebSocket...');
 
 // 5. Start dashboard
 this.startDashboard();
 
-// 6. Start rate limit cache cleanup (every 5 minutes)
+// 6. Start Telegram command polling (for /wallet, /stats, etc)
+this.telegram.startCommandPolling();
+logger.info('[Main] Telegram command polling started (commands: /wallet, /stats, /holdings, /ping)');
+
+// 7. Start rate limit cache cleanup (every 5 minutes)
 this.startRateLimitCleanup();
 logger.info(`[Main] Rate limit cache cleanup started (window: ${this.DUPLICATE_BUY_WINDOW_MS / 1000}s)`);
 
-// 7. Start inang entries cleanup (every 6 hours - prevent memory leak)
+// 8. Start inang entries cleanup (every 6 hours - prevent memory leak)
 this.startInangEntriesCleanup();
 
 // 8. Setup graceful shutdown
@@ -113,24 +136,26 @@ process.exit(1);
 
 /**
 * Wire up all event listeners between components
+* NOTE: Eye mode - new token hunting
 */
 private setupWiring(): void {
-// WIRING 1: Eye on inang_added -> InangMonitor.addInangToMonitor()
-this.eye.on('inang_added', async (event: any) => {
-const inang = event.data;
-logger.info(`[Event] NEW INANG DISCOVERED: ${inang.address}`);
-logger.info(`        Winrate: ${inang.winrate?.toFixed(2)}%, PnL: ${inang.totalPnl?.toFixed(4)} SOL`);
+// WIRING 1: Eye on 'inang' -> InangMonitor.addInangToMonitor()
+this.eye.on('inang', async (event: any) => {
+const inang = event;
+logger.info(`[Event] 🎯 INSIDER DISCOVERED: ${inang.trader?.substring(0, 12)}...`);
+logger.info(`        Token: ${inang.symbol} ($${(inang.mcap/1000).toFixed(1)}K)`);
+logger.info(`        Winrate: ${inang.winrate?.toFixed(2)}%, PnL: ${inang.pnl?.toFixed(4)} SOL`);
 
 // Send Telegram notification
 await this.telegram.notifyInangFound(
-inang.address,
+inang.trader,
 inang.winrate || 0,
-inang.totalPnl || 0,
-inang.totalTx || 0
+inang.pnl || 0,
+0 // totalTx not available in EyeInsider event
 );
 
-// Add to monitor
-this.inangMonitor.addInangToMonitor(inang.address);
+// Add to monitor (untuk copy-trade)
+this.inangMonitor.addInangToMonitor(inang.trader);
 });
 
 // WIRING 2: InangMonitor on inang_buying -> TradeEngine.buy -> PriceMonitor.startTracking
@@ -155,20 +180,22 @@ return; // Skip this buy
 
 logger.info(`[Trade] Filters passed: Mcap=${tokenMcap.toFixed(2)} SOL, InangBuy=${event.solAmount.toFixed(4)} SOL`);
 
-// === SYARAT 3: Max concurrent positions limit ===
+// === SYARAT 3: Max concurrent positions limit (INCLUDING in-flight) ===
 const openPositions = this.tradeBase.getOpenPositionsCount();
+const inFlightCount = this.inFlightBuys.size;
+const totalOccupied = openPositions + inFlightCount;
 const maxPositions = CONFIG.MAX_CONCURRENT_POSITIONS;
 
-if (openPositions >= maxPositions) {
-logger.warn(`[Trade] BUY BLOCKED: Max positions reached (${openPositions}/${maxPositions})`);
+if (totalOccupied >= maxPositions) {
+logger.warn(`[Trade] BUY BLOCKED: Max positions reached (${openPositions} open + ${inFlightCount} in-flight = ${totalOccupied}/${maxPositions})`);
 logger.warn(`[Trade] Ignoring buy signal from ${event.inangAddress.substring(0, 12)}...`);
 return; // Skip this buy
 }
 
-logger.info(`[Trade] Position check: ${openPositions}/${maxPositions} - Proceeding with buy`);
+logger.info(`[Trade] Position check: ${openPositions} open + ${inFlightCount} in-flight = ${totalOccupied}/${maxPositions} - Proceeding with buy`);
 
 // === SYARAT 4: EXTENDED BLOCK CHECK - Prevent rebuy of blocked tokens ===
-        const tokenLower=event.tokenAddress.toLowerCase();
+const tokenLower = event.tokenAddress.toLowerCase();
 const now = Date.now();
 const extendedBlock = this.extendedBuyBlock.get(tokenLower);
 
@@ -189,12 +216,21 @@ logger.warn(`[Trade] Already bought within last ${Math.floor(this.DUPLICATE_BUY_
 return; // Skip this buy
 }
 
-// Add to cache before executing (prevent race conditions)
+// === SYARAT 6: IN-FLIGHT CHECK - Prevent concurrent buy of same token ===
+if (this.inFlightBuys.has(tokenLower)) {
+  logger.warn(`[Trade] BUY BLOCKED: Token ${event.tokenSymbol} already has a buy in progress`);
+  return; // Skip - another buy is being processed
+}
+
+// Add to caches BEFORE executing (prevent ALL race conditions)
 this.recentBuyCache.set(tokenLower, now);
-logger.info(`[Trade] Rate limit check passed - Added ${event.tokenSymbol} to buy cache`);
+this.inFlightBuys.add(tokenLower);
+logger.info(`[Trade] Rate limit check passed - Added ${event.tokenSymbol} to buy cache and in-flight`);
 
 // Execute copy-trade buy
-const buyResult = await this.tradeEngine.buy(
+let buyResult;
+try {
+buyResult = await this.tradeEngine.buy(
 event.tokenAddress,
 event.solAmount // Or use CONFIG.copyTradeAmount
 );
@@ -237,6 +273,14 @@ buyResult.error || 'Unknown error'
 } catch (error) {
 const errMsg = error instanceof Error ? error.message : String(error);
 logger.error(`[Trade] Error during copy-buy: ${errMsg}`);
+} finally {
+// CRITICAL: Always remove from in-flight, regardless of success/failure
+this.inFlightBuys.delete(tokenLower);
+logger.info(`[Trade] Removed ${event.tokenSymbol} from in-flight buys`);
+}
+} catch (error) {
+const errMsg = error instanceof Error ? error.message : String(error);
+logger.error(`[Trade] Critical error in inang_buying handler: ${errMsg}`);
 }
 });
 
@@ -373,6 +417,146 @@ const errMsg = error instanceof Error ? error.message : String(error);
 logger.error(`[Trade] Error during emergency sell: ${errMsg}`);
 }
 });
+}
+
+/**
+* Setup Telegram command handlers for on-demand wallet reports
+*/
+private setupTelegramCommands(): void {
+logger.info('[Telegram] Setting up command handlers...');
+
+// Command: /wallet - Full wallet report
+this.telegram.onCommand('wallet', async (cmd, args) => {
+  logger.info(`[Telegram] Processing /${cmd} command`);
+  try {
+    const walletInfo = await this.walletManager.getWalletInfo();
+    const openTrades = this.tradeBase.getOpenTrades();
+    await this.telegram.notifyWalletReport(walletInfo, openTrades);
+    logger.info('[Telegram] Wallet report sent');
+  } catch (error) {
+    logger.error(`[Telegram] Failed to send wallet report: ${error}`);
+    await this.telegram.sendAlert('❌ *Error*\n\nFailed to get wallet report. Check logs.');
+  }
+});
+
+// Command: /stats - Quick stats (alias for wallet)
+this.telegram.onCommand('stats', async (cmd, args) => {
+  logger.info(`[Telegram] Processing /${cmd} command`);
+  try {
+    const walletInfo = await this.walletManager.getWalletInfo();
+    const openTrades = this.tradeBase.getOpenTrades();
+    await this.telegram.notifyWalletReport(walletInfo, openTrades);
+    logger.info('[Telegram] Stats report sent');
+  } catch (error) {
+    logger.error(`[Telegram] Failed to send stats report: ${error}`);
+    await this.telegram.sendAlert('❌ *Error*\n\nFailed to get stats. Check logs.');
+  }
+});
+
+// Command: /holdings - Just the holdings list
+this.telegram.onCommand('holdings', async (cmd, args) => {
+  logger.info(`[Telegram] Processing /${cmd} command`);
+  try {
+    const openTrades = this.tradeBase.getOpenTrades();
+    const solBalance = await this.tradeEngine.getBalance();
+    
+    let message = `📋 *CURRENT HOLDINGS*\n\n`;
+    message += `💰 SOL Balance: ${solBalance.toFixed(4)} SOL\n`;
+    message += `🪙 Open Positions: ${openTrades.length}\n\n`;
+    
+    if (openTrades.length > 0) {
+      openTrades.slice(0, 15).forEach((trade, idx) => {
+        const trailing = trade.is_trailing_active ? '🟢' : '⏸️';
+        const symbol = trade.token_symbol || 'UNKNOWN';
+        message += `${idx + 1}. \`${symbol}\` @ ${trade.entry_price.toFixed(6)} ${trailing}\n`;
+      });
+      if (openTrades.length > 15) {
+        message += `... and ${openTrades.length - 15} more\n`;
+      }
+    } else {
+      message += `_No open positions_`;
+    }
+    
+    await this.telegram.sendAlert(message);
+    logger.info('[Telegram] Holdings report sent');
+  } catch (error) {
+    logger.error(`[Telegram] Failed to send holdings: ${error}`);
+    await this.telegram.sendAlert('❌ *Error*\n\nFailed to get holdings. Check logs.');
+  }
+});
+
+// Command: /ping - Check if bot alive
+this.telegram.onCommand('ping', async (cmd, args) => {
+  const openTrades = this.tradeBase.getOpenTradesCount();
+  const activeInangs = this.inangBase.getInangStats().active;
+  const eyeStatus = this.eye['isRunning'] ? '🟢 Running' : '🔴 Stopped';
+  await this.telegram.sendAlert(
+    `🏓 *PONG*\n\n` +
+    `Bot is running!\n` +
+    `📊 ${openTrades} open positions\n` +
+    `👀 ${activeInangs} inangs monitored\n` +
+    `👁️ Eye: ${eyeStatus}`
+  );
+});
+
+// Command: /eyestop - Stop Eye (new token detection)
+this.telegram.onCommand('eyestop', async (cmd, args) => {
+  logger.info('[Telegram] Stopping Eye (new token detection)...');
+  try {
+    this.eye.stop();
+    await this.telegram.sendAlert(
+      `👁️ *EYE STOPPED*\n\n` +
+      `New token detection is now OFF.\n\n` +
+      `✅ Monitoring tetap jalan\n` +
+      `✅ Price tracking tetap aktif\n` +
+      `✅ Trailing stop tetap berfungsi\n\n` +
+      `Gunakan /eyestart untuk nyalakan lagi.`
+    );
+    logger.info('[Telegram] Eye stopped via command');
+  } catch (error) {
+    logger.error(`[Telegram] Failed to stop Eye: ${error}`);
+    await this.telegram.sendAlert('❌ *Error*\n\nFailed to stop Eye. Check logs.');
+  }
+});
+
+// Command: /eyestart - Start Eye (new token detection)
+this.telegram.onCommand('eyestart', async (cmd, args) => {
+  logger.info('[Telegram] Starting Eye (new token detection)...');
+  try {
+    if (this.eye['isRunning']) {
+      await this.telegram.sendAlert(
+        `👁️ *EYE ALREADY RUNNING*\n\n` +
+        `Eye sudah aktif, gak perlu di-start lagi.`
+      );
+      return;
+    }
+    await this.eye.start();
+    await this.telegram.sendAlert(
+      `👁️ *EYE STARTED*\n\n` +
+      `New token detection is now ON.\n\n` +
+      `👀 Eye sekarang hunting token baru...`
+    );
+    logger.info('[Telegram] Eye started via command');
+  } catch (error) {
+    logger.error(`[Telegram] Failed to start Eye: ${error}`);
+    await this.telegram.sendAlert('❌ *Error*\n\nFailed to start Eye. Check logs.');
+  }
+});
+
+// Command: /eyestatus - Check Eye status
+this.telegram.onCommand('eyestatus', async (cmd, args) => {
+  const eyeRunning = this.eye['isRunning'];
+  const status = eyeRunning ? '🟢 RUNNING' : '🔴 STOPPED';
+  const action = eyeRunning ? 'Gunakan /eyestop untuk matiin.' : 'Gunakan /eyestart untuk nyalakan.';
+  await this.telegram.sendAlert(
+    `👁️ *EYE STATUS*\n\n` +
+    `Status: ${status}\n\n` +
+    `${action}\n\n` +
+    `Note: Monitoring & price tracking tetep jalan walau Eye mati.`
+  );
+});
+
+logger.info('[Telegram] Command handlers registered: /wallet, /stats, /holdings, /ping, /eyestop, /eyestart, /eyestatus');
 }
 
 /**
@@ -528,7 +712,7 @@ setInterval(() => {
 this.inangMonitor.cleanupOldEntries();
 const stats = this.inangMonitor.getEntryStats();
 logger.info(`[InangEntries] Cleanup done. Active entries: ${stats.total}`);
-}, 6 * 60 * 60 * 1000); // Run every 6 hours
+}, CONFIG.INANG_CLEANUP_INTERVAL_MS); // Run every 6 hours
 }
 
 /**
@@ -542,6 +726,10 @@ try {
 if (this.dashboardInterval) {
 clearInterval(this.dashboardInterval);
 }
+
+// Stop Telegram command polling
+this.telegram.stopCommandPolling();
+logger.info('[Telegram] Command polling stopped');
 
 // Stop rate limit cleanup
 if (this.rateLimitCleanupInterval) {
