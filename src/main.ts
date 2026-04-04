@@ -100,7 +100,8 @@ logger.info('[Main] PriceMonitor started');
 
 // SYNC: Resume tracking for any open trades from database
 // (e.g., after bot restart with positions still open)
-await this.syncOpenTradesToPriceMonitor();
+// WITH wallet validation - checks actual token balances
+await this.syncOpenTradesWithWalletValidation();
 
 // Start Eye (new token hunter)
 await this.eye.init();
@@ -118,7 +119,10 @@ logger.info('[Main] Telegram command polling started (commands: /wallet, /stats,
 this.startRateLimitCleanup();
 logger.info(`[Main] Rate limit cache cleanup started (window: ${this.DUPLICATE_BUY_WINDOW_MS / 1000}s)`);
 
-// 8. Start inang entries cleanup (every 6 hours - prevent memory leak)
+// 8. Start wallet sync check (every 5 minutes - detect manual sells/buys)
+this.startWalletSyncCheck();
+
+// 9. Start inang entries cleanup (every 6 hours - prevent memory leak)
 this.startInangEntriesCleanup();
 
 // 8. Setup graceful shutdown
@@ -702,41 +706,148 @@ console.log('');
 }
 
 /**
-* Sync open trades from TradeBase to PriceMonitor
-* Called on startup to resume tracking for positions that were open before restart
+* Sync open trades with wallet validation
+* Called on startup to:
+* 1. Check actual token balances in wallet
+* 2. Resume tracking for tokens that still exist
+* 3. Mark as SOLD_MANUAL for tokens no longer in wallet
+* 4. Detect BOUGHT_MANUAL for new tokens in wallet not in DB
 */
-private async syncOpenTradesToPriceMonitor(): Promise<void> {
+private async syncOpenTradesWithWalletValidation(): Promise<void> {
 try {
 const openTrades = this.tradeBase.getOpenTrades();
+const walletTokens = await this.tradeEngine.getAllTokenBalances();
 
-if (openTrades.length === 0) {
-logger.info('[Main] No open trades to sync - starting fresh');
-return;
-}
+logger.info(`[Main] Wallet validation: ${openTrades.length} DB positions, ${walletTokens.size} tokens in wallet`);
 
-logger.info(`[Main] Syncing ${openTrades.length} open trades to PriceMonitor...`);
+let resumed = 0;
+let soldManual = 0;
+let boughtManual = 0;
 
+// Check each DB trade against wallet
 for (const trade of openTrades) {
 try {
-// Get current price for this token to update highest price
+const tokenLower = trade.token_address.toLowerCase();
+const balance = walletTokens.get(tokenLower);
+
+if (balance && balance > 0) {
+// Token still in wallet - resume tracking
 await this.priceMonitor.startTracking(trade.token_address, trade.entry_price);
 
-// Also sync highest_price from database
+// Sync highest price from database
 if (trade.highest_price > trade.entry_price) {
 this.tradeBase.updateHighestPriceByToken(trade.token_address, trade.highest_price);
-logger.info(`[Main]   ↳ ${trade.token_symbol}: entry=${trade.entry_price.toFixed(9)}, highest=${trade.highest_price.toFixed(9)}, trailing=${trade.is_trailing_active ? 'ON' : 'OFF'}`);
+}
+
+logger.info(`[Main]   ✅ Resume: ${trade.token_symbol} (balance: ${balance})`);
+resumed++;
 } else {
-logger.info(`[Main]   ↳ ${trade.token_symbol}: entry=${trade.entry_price.toFixed(9)} (no price update yet)`);
+// Token not in wallet - mark as manual sell
+// Estimate exit price from entry (can't know actual)
+const exitPrice = trade.entry_price; // neutral PnL
+const result = this.tradeBase.closeTradeManual(trade.token_address, exitPrice);
+
+if (result.success) {
+logger.info(`[Main]   🔴 Manual sell: ${trade.token_symbol} (no longer in wallet)`);
+await this.telegram.notifyManualSell(trade.token_address, trade.token_symbol, result.pnlPercent || 0);
+soldManual++;
+}
 }
 } catch (err) {
-logger.error(`[Main] Failed to sync trade ${trade.token_symbol}: ${err}`);
+logger.error(`[Main] Failed to validate trade ${trade.token_symbol}: ${err}`);
 }
 }
 
-logger.info(`[Main] Sync complete - PriceMonitor now tracking ${openTrades.length} tokens`);
-} catch (error) {
-logger.error(`[Main] Error syncing open trades: ${error}`);
+// Check for manual buys (tokens in wallet but not in DB)
+walletTokens.forEach((balance, mint) => {
+const existingTrade = openTrades.find(t => t.token_address.toLowerCase() === mint.toLowerCase());
+if (!existingTrade) {
+// New token not tracked - could be manual buy
+// Add to DB with 'MANUAL_BUY' marker
+const symbol = 'MANUAL'; // Can't know symbol without lookup
+const entryPrice = 0; // Unknown entry price
+
+const result = this.tradeBase.addManualBuy(mint, symbol, entryPrice, balance);
+if (result.success) {
+logger.info(`[Main]   🟢 Manual buy: ${mint.substring(0, 12)}... (balance: ${balance})`);
+this.telegram.notifyManualBuy(mint, symbol, balance);
+boughtManual++;
 }
+}
+});
+
+// Send summary notification
+await this.telegram.notifyWalletSync(resumed, soldManual, boughtManual);
+
+logger.info(`[Main] Wallet sync complete: ${resumed} resumed, ${soldManual} sold manual, ${boughtManual} bought manual`);
+} catch (error) {
+logger.error(`[Main] Error in wallet sync: ${error}`);
+}
+}
+
+/**
+* Start periodic wallet sync check (every 5 minutes)
+* Detects manual sells/buys while bot is running
+*/
+private startWalletSyncCheck(): void {
+const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
+setInterval(async () => {
+try {
+logger.info('[WalletSync] Periodic check starting...');
+
+const openTrades = this.tradeBase.getOpenTrades();
+const walletTokens = await this.tradeEngine.getAllTokenBalances();
+
+let soldManual = 0;
+let boughtManual = 0;
+
+// Check for manual sells
+for (const trade of openTrades) {
+const tokenLower = trade.token_address.toLowerCase();
+const balance = walletTokens.get(tokenLower);
+
+if (!balance || balance === 0) {
+// Token sold manually
+const exitPrice = trade.entry_price;
+const result = this.tradeBase.closeTradeManual(trade.token_address, exitPrice);
+
+if (result.success) {
+this.priceMonitor.stopTracking(trade.token_address);
+logger.info(`[WalletSync] Manual sell detected: ${trade.token_symbol}`);
+await this.telegram.notifyManualSell(trade.token_address, trade.token_symbol, result.pnlPercent || 0);
+soldManual++;
+}
+}
+}
+
+// Check for manual buys
+walletTokens.forEach((balance, mint) => {
+const existingTrade = openTrades.find(t => t.token_address.toLowerCase() === mint.toLowerCase());
+if (!existingTrade) {
+// Check if recently added (avoid duplicate notifications)
+const recentlyAdded = this.tradeBase.getTradeByToken(mint);
+if (!recentlyAdded) {
+const result = this.tradeBase.addManualBuy(mint, 'MANUAL', 0, balance);
+if (result.success) {
+logger.info(`[WalletSync] Manual buy detected: ${mint.substring(0, 12)}...`);
+this.telegram.notifyManualBuy(mint, 'MANUAL', balance);
+boughtManual++;
+}
+}
+}
+});
+
+if (soldManual > 0 || boughtManual > 0) {
+logger.info(`[WalletSync] Detected: ${soldManual} sells, ${boughtManual} buys`);
+}
+
+} catch (error) {
+logger.error(`[WalletSync] Periodic check error: ${error}`);
+}
+}, CHECK_INTERVAL_MS);
+
+logger.info('[Main] Wallet sync check started (every 5 minutes)');
 }
 
 /**

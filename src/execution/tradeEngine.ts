@@ -129,6 +129,37 @@ export class TradeEngine {
     }
   }
 
+  /**
+   * Get all token accounts in wallet with non-zero balance
+   * Returns map of mint -> balance
+   */
+  async getAllTokenBalances(): Promise<Map<string, number>> {
+    try {
+      const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(
+        this.keypair.publicKey,
+        { programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') }
+      );
+
+      const balances = new Map<string, number>();
+      
+      for (const account of tokenAccounts.value) {
+        const parsed = account.account.data.parsed;
+        const mint = parsed.info.mint;
+        const balance = parsed.info.tokenAmount.uiAmount || 0;
+        
+        if (balance > 0) {
+          balances.set(mint, balance);
+        }
+      }
+      
+      logger.info(`[TradeEngine] Found ${balances.size} tokens in wallet`);
+      return balances;
+    } catch (error) {
+      logger.error(`[TradeEngine] getAllTokenBalances error: ${error}`);
+      return new Map();
+    }
+  }
+
   // ==================== PUBLIC API (for main.ts) ====================
 
   async buy(mint: string, amountSol: number): Promise<TradeResult> {

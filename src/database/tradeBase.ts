@@ -283,6 +283,90 @@ export class TradeBase {
   }
 
   /**
+   * Close trade manually (user sold via wallet)
+   * Mark with special pnl code for manual sells
+   */
+  public closeTradeManual(tokenAddress: string, exitPrice: number): { success: boolean; error?: string; pnlPercent?: number } {
+    try {
+      const tokenLower = tokenAddress.toLowerCase();
+      
+      // Get trade info to calculate PnL
+      const trade = this.getTradeByToken(tokenLower);
+      if (!trade) {
+        return { success: false, error: 'Trade not found' };
+      }
+      
+      // Calculate PnL
+      const pnlPercent = ((exitPrice - trade.entry_price) / trade.entry_price) * 100;
+      
+      const updateSQL = `
+        UPDATE trades 
+        SET status = 'CLOSED', 
+            pnl_percent = ?,
+            closed_at = CURRENT_TIMESTAMP
+        WHERE token_address=? AND status = 'OPEN'
+      `;
+      
+      const result = this.db.prepare(updateSQL).run(pnlPercent, tokenLower);
+      
+      if (result.changes === 0) {
+        return { success: false, error: 'Trade not found or already closed' };
+      }
+      
+      logger.info(`[TradeBase] Manual sell recorded for ${tokenAddress.substring(0, 12)}...: ${pnlPercent.toFixed(2)}% PnL`);
+      
+      return { success: true, pnlPercent };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      logger.error(`[TradeBase] Error recording manual sell: ${errMsg}`);
+      return { success: false, error: errMsg };
+    }
+  }
+
+  /**
+   * Add manual buy (user bought via wallet, not from bot)
+   * Track for monitoring but marked as manual
+   */
+  public addManualBuy(tokenAddress: string, tokenSymbol: string, entryPrice: number, tokenAmount: number): { success: boolean; error?: string } {
+    try {
+      const tokenLower = tokenAddress.toLowerCase();
+      
+      // Check if already exists
+      const existing = this.getTradeByToken(tokenLower);
+      if (existing) {
+        return { success: false, error: 'Token already tracked' };
+      }
+      
+      const insertSQL = `
+        INSERT INTO trades (
+          token_address, token_symbol, inang_address, entry_price, 
+          buy_amount_sol, token_amount, status, highest_price, is_trailing_active
+        ) VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, 0)
+      `;
+      
+      // Calculate SOL spent estimate from entry price and amount
+      const solSpent = entryPrice * tokenAmount;
+      
+      this.db.prepare(insertSQL).run(
+        tokenLower,
+        tokenSymbol,
+        'MANUAL_BUY', // Special marker for manual buys
+        entryPrice,
+        solSpent,
+        tokenAmount,
+        entryPrice // initial highest price
+      );
+      
+      logger.info(`[TradeBase] Manual buy recorded: ${tokenSymbol} @ ${entryPrice} SOL`);
+      return { success: true };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      logger.error(`[TradeBase] Error recording manual buy: ${errMsg}`);
+      return { success: false, error: errMsg };
+    }
+  }
+
+  /**
    * Get today's PnL (for dashboard)
    */
   public getTodayPnL(): number {

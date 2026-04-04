@@ -323,6 +323,80 @@ export class TelegramService {
   }
 
   /**
+   * Template: Manual sell detected (user sold via wallet)
+   */
+  async notifyManualSell(
+    tokenAddress: string,
+    tokenSymbol: string,
+    pnlPercent: number
+  ): Promise<boolean> {
+    const emoji = pnlPercent >= 0 ? '🟢' : '🔴';
+    const pnlSign = pnlPercent >= 0 ? '+' : '';
+
+    const message = 
+      `🔴 *MANUAL SELL TERDETEKSI*\n\n` +
+      `🪙 Token: \`${tokenSymbol}\`\n` +
+      `📍 Address: \`${tokenAddress.substring(0, 16)}...\`\n` +
+      `${emoji} PnL: ${pnlSign}${pnlPercent.toFixed(2)}%\n\n` +
+      `⚠️ Token dijual manual via wallet\n` +
+      `✅ Database sudah di-update`
+    ;
+
+    return this.sendAlert(message);
+  }
+
+  /**
+   * Template: Manual buy detected (user bought via wallet)
+   */
+  async notifyManualBuy(
+    tokenAddress: string,
+    tokenSymbol: string,
+    balance: number
+  ): Promise<boolean> {
+    const message = 
+      `🟢 *MANUAL BUY TERDETEKSI*\n\n` +
+      `🪙 Token: \`${tokenSymbol}\`\n` +
+      `📍 Address: \`${tokenAddress.substring(0, 16)}...\`\n` +
+      `💰 Balance: ${balance.toFixed(6)}\n\n` +
+      `👤 Token dibeli manual via wallet\n` +
+      `✅ Ditambahkan ke monitoring`
+    ;
+
+    return this.sendAlert(message);
+  }
+
+  /**
+   * Template: Wallet sync report on startup
+   */
+  async notifyWalletSync(
+    resumed: number,
+    soldManual: number,
+    boughtManual: number
+  ): Promise<boolean> {
+    let message = 
+      `🔄 *WALLET SYNC COMPLETE*\n\n` +
+      `📊 Hasil validasi startup:\n`
+    ;
+
+    if (resumed > 0) {
+      message += `✅ ${resumed} posisi resume tracking\n`;
+    }
+    if (soldManual > 0) {
+      message += `🔴 ${soldManual} token terjual manual\n`;
+    }
+    if (boughtManual > 0) {
+      message += `🟢 ${boughtManual} token baru (manual buy)\n`;
+    }
+    if (resumed === 0 && soldManual === 0 && boughtManual === 0) {
+      message += `ℹ️ Tidak ada perubahan\n`;
+    }
+
+    message += `\n💡 Monitoring aktif untuk semua token.`;
+
+    return this.sendAlert(message);
+  }
+
+  /**
    * Check if telegram is configured
    */
   isEnabled(): boolean {
