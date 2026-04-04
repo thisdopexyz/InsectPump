@@ -938,13 +938,8 @@ export class Eye extends EventEmitter {
     }
 
     this.reconnectAttempts++;
-    const delay = CONSTANTS.WS_RECONNECT_INTERVAL_MS * this.reconnectAttempts;
-
-    logger.info(`[Eye] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${CONSTANTS.MAX_WS_RECONNECT_ATTEMPTS})`);
-
-    setTimeout(() => {
-      this.connect();
-    }, delay);
+    logger.warn(`[Eye] Disconnected. Use /eyereconnect to reconnect (attempt ${this.reconnectAttempts}/${CONSTANTS.MAX_WS_RECONNECT_ATTEMPTS})`);
+    // NOTE: Auto-reconnect disabled - use /eyereconnect command to reconnect
   }
 
   /**

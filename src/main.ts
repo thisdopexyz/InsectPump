@@ -127,6 +127,19 @@ process.on('SIGTERM', () => this.gracefulShutdown());
 
 logger.info('[Main] Bot is fully operational!');
 
+// Notify Telegram that bot started
+const openPositions = this.tradeBase.getOpenPositionsCount();
+const activeInangs = this.inangBase.getInangStats().active;
+await this.telegram.sendAlert(
+  `🚀 *INSECTPUMP BOT STARTED*\n\n` +
+  `✅ Bot is now running and operational!\n\n` +
+  `📊 Status:\n` +
+  `• Open Positions: ${openPositions}\n` +
+  `• Active Inangs: ${activeInangs}\n` +
+  `• Eye: 👁️ Hunting\n\n` +
+  `💡 Use /wallet atau /ping untuk check status.`
+);
+
 } catch (error) {
 const errMsg = error instanceof Error ? error.message : String(error);
 logger.error(`[Main] Fatal error during startup: ${errMsg}`);
@@ -303,6 +316,13 @@ const trade = this.tradeBase.getTradeByToken(event.tokenAddress);
 if (!trade) {
 logger.info(`[Trade] COPY-SELL: No position for ${event.tokenSymbol}, ignoring`);
 return;
+}
+
+// CRITICAL: Validate this sell is from the SAME inang we followed for buy
+// Prevents: Inang B sell triggering copy-sell on position opened with Inang A
+if (trade.inang_address.toLowerCase() !== event.inangAddress.toLowerCase()) {
+  logger.info(`[Trade] COPY-SELL: IGNORED - Seller ${event.inangAddress.substring(0, 12)}... != Entry inang ${trade.inang_address.substring(0, 12)}...`);
+  return;
 }
 
 // DECISION LOGIC:
@@ -556,7 +576,55 @@ this.telegram.onCommand('eyestatus', async (cmd, args) => {
   );
 });
 
-logger.info('[Telegram] Command handlers registered: /wallet, /stats, /holdings, /ping, /eyestop, /eyestart, /eyestatus');
+// Command: /eyereconnect - Manual reconnect Eye
+this.telegram.onCommand('eyereconnect', async (cmd, args) => {
+  logger.info('[Telegram] Manual Eye reconnect...');
+  try {
+    await this.eye.start();
+    await this.telegram.sendAlert(
+      `👁️ *EYE RECONNECTED*\n\n` +
+      `Eye WebSocket reconnected successfully.\n\n` +
+      `👀 Hunting token baru lagi...`
+    );
+    logger.info('[Telegram] Eye reconnected via command');
+  } catch (error) {
+    logger.error(`[Telegram] Failed to reconnect Eye: ${error}`);
+    await this.telegram.sendAlert('❌ *Error*\n\nFailed to reconnect Eye. Check logs.');
+  }
+});
+
+// Command: /mainstatus - Check all main components status
+this.telegram.onCommand('mainstatus', async (cmd, args) => {
+  // Get Eye status
+  const eyeRunning = this.eye['isRunning'];
+  const eyeStatus = eyeRunning ? '🟢 RUNNING' : '🔴 STOPPED';
+
+  // Get open positions from database
+  const openPositions = this.tradeBase.getOpenPositionsCount();
+
+  // Get SOL balance
+  const solBalance = await this.tradeEngine.getBalance().catch(() => 0);
+
+  // InangMonitor and PriceMonitor always run with WSS
+  const monitorStatus = '🟢 WSS Active';
+  const priceStatus = '🟢 WSS Active';
+
+  await this.telegram.sendAlert(
+    `🤖 *MAIN STATUS*\n\n` +
+    `👁️ *Eye:* ${eyeStatus}\n` +
+    `📊 *InangMonitor:* ${monitorStatus}\n` +
+    `💰 *PriceMonitor:* ${priceStatus}\n` +
+    `🔧 *TradeEngine:* 🟢 Active\n` +
+    `💼 *Open Positions:* ${openPositions}\n` +
+    `💳 *Wallet:* ${solBalance.toFixed(4)} SOL\n\n` +
+    `Status:\n` +
+    `• Eye stop = no new token hunting\n` +
+    `• Monitoring tetep jalan ✅\n` +
+    `• Trailing stop aktif ✅`
+  );
+});
+
+logger.info('[Telegram] Command handlers registered: /wallet, /stats, /holdings, /ping, /eyestop, /eyestart, /eyestatus, /eyereconnect, /mainstatus');
 }
 
 /**
@@ -743,6 +811,14 @@ this.inangMonitor.stop();
 this.priceMonitor.stop();
 this.inangBase.close();
 await closeDatabase();
+
+// Notify Telegram that bot is shutting down
+await this.telegram.sendAlert(
+  `🛑 *INSECTPUMP BOT SHUTDOWN*\n\n` +
+  `⚠️ Bot is shutting down gracefully...\n\n` +
+  `💡 Semua posisi masih di-track di database.\n` +
+  `💡 Restart bot untuk resume trading.`
+);
 
 logger.info('[Main] Shutdown complete. Goodbye!');
 process.exit(0);

@@ -48,9 +48,9 @@ export class InangMonitor extends EventEmitter {
   private inangEntries: Map<string, { entryPrice: number; timestamp: number }> = new Map();
 
   /**
-   * Auto-cleanup entries older than 7 days (prevent memory leak)
+   * Auto-cleanup entries older than threshold (prevent memory leak)
    */
-  private readonly ENTRY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+  private readonly ENTRY_MAX_AGE_MS = CONFIG.INANG_ENTRY_MAX_AGE_MS;
 
   constructor(inangBase: InangBase, pumpPortalWsUrl: string) {
     super();
@@ -134,7 +134,12 @@ export class InangMonitor extends EventEmitter {
     if (!this.isRunning) return;
 
     try {
-      this.ws = new WebSocket(this.pumpPortalWsUrl);
+      this.ws = new WebSocket(this.pumpPortalWsUrl, {
+        headers: {
+          'Origin': 'https://pumpportal.fun',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      });
 
       this.ws.on('open', () => {
         logger.info('[Monitor] Connected to PumpPortal WSS');

@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import { createModuleLogger } from '../utils/logger';
+import { CONFIG } from '../config/config';
 
 const logger = createModuleLogger('DB');
 
@@ -151,7 +152,7 @@ export class TradeBase {
   }
 
   /**
-   * Update highest price and auto-activate trailing stop if profit > 30%
+   * Update highest price and auto-activate trailing stop if profit > threshold
    */
   public updateHighestPrice(id: number, price: number): { success: boolean; trailingActivated?: boolean; error?: string } {
     try {
@@ -170,14 +171,15 @@ export class TradeBase {
 
       // Calculate profit percentage
       const profitPercent = ((price - trade.entry_price) / trade.entry_price) * 100;
+      const trailingThreshold = CONFIG.TRAILING_ACTIVATION_PERCENT;
       
-      // Activate trailing stop if profit > 30% and not already active
-      const shouldActivateTrailing = profitPercent > 30 && trade.is_trailing_active === 0;
+      // Activate trailing stop if profit > threshold and not already active
+      const shouldActivateTrailing = profitPercent > trailingThreshold && trade.is_trailing_active === 0;
       
       const updateSQL = `
         UPDATE trades 
         SET highest_price = ?, 
-            is_trailing_active = CASE WHEN ? > 30 AND is_trailing_active = 0 THEN 1 ELSE is_trailing_active END,
+            is_trailing_active = CASE WHEN ? > ${trailingThreshold} AND is_trailing_active = 0 THEN 1 ELSE is_trailing_active END,
             pnl_percent = ?
         WHERE id = ?
       `;

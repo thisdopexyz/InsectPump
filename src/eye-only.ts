@@ -1,13 +1,17 @@
 /**
  * Eye Only Mode - Discovery/Scouter tanpa trading
+ * Eye: New token hunting (WebSocket mode)
  * Hanya scan dan detect inang quality, simpan ke DB
  */
 
-import 'dotenv/config'; // Load .env first
+import 'dotenv/config';
 import { CONFIG, validateConfig } from './config/config';
 import { initDatabase, closeDatabase } from './database/sqlite';
 import { InangBase } from './database/inangBase';
+// Eye (new token) - ACTIVE
 import { Eye } from './discovery/eye';
+// EyeInsider moved to test/ for debugging
+// import { EyeInsider } from './discovery/EyeInsider';
 import { TelegramService } from './services/telegram';
 import { createModuleLogger } from './utils/logger';
 
@@ -15,12 +19,14 @@ const logger = createModuleLogger('EyeOnly');
 
 class EyeOnlyMode {
   private inangBase: InangBase;
-  private eye: Eye;
+  private eye: Eye;  // Active - new token hunting
+  // private eyeInsider: EyeInsider;  // Disabled - moved to test/
   private telegram: TelegramService;
 
   constructor() {
     this.inangBase = new InangBase();
-    this.eye = new Eye();
+    this.eye = new Eye();  // Active
+    // this.eyeInsider = new EyeInsider();  // Disabled
     this.telegram = new TelegramService();
   }
 
@@ -47,18 +53,18 @@ class EyeOnlyMode {
 
       // 4. Start Eye
       await this.eye.init();
-      await this.eye.start();
-      logger.info('[EyeOnly] 🎯 Eye radar ACTIVE - Scanning Pump.fun...');
+      this.eye.start();
+      logger.info('[EyeOnly] 👁️ Eye ACTIVE - New token hunting...');
       logger.info('[EyeOnly] Press Ctrl+C to stop');
 
       // 5. Send startup notif
         await this.telegram.sendAlert(
         `🛰️ *EYE ONLY MODE ACTIVATED*\n\n` +
-        `📡 Scanning: Pump.fun global trades\n` +
-        `🎯 Filters: 4-Layer (L1→L4)\n` +
+        `📡 Scanning: New tokens (WebSocket)\n` +
+        `🎯 Strategy: Early insider detection\n` +
         `💾 Storage: SQLite (inangpump.db)\n` +
         `⏱️ Started: ${new Date().toISOString()}\n\n` +
-        `_Waiting for quality inang..._`
+        `_Waiting for insiders..._`
       );
 
       // 6. Graceful shutdown
@@ -73,42 +79,36 @@ class EyeOnlyMode {
   }
 
   private setupEyeHandlers(): void {
-    // Handle inang yang lolos semua filter
-    this.eye.on('inang_added', async (event: any) => {
-      const inang = event.data;
-      logger.info(`[EyeOnly] ✅ NEW INANG DETECTED: ${inang.address?.slice(0, 12)}...`);
-      logger.info(`[EyeOnly]    Winrate: ${inang.winrate}% | Trades: ${inang.totalTrades} | PnL: ${inang.totalPnl} SOL`);
+    // Handle inang dari Eye
+    this.eye.on('inang', async (event: any) => {
+      const inang = event;
+      logger.info(`[EyeOnly] 🎯 INSIDER DETECTED: ${inang.trader?.slice(0, 12)}...`);
+      logger.info(`[EyeOnly]    Token: ${inang.symbol} | Winrate: ${inang.winrate}% | PnL: ${inang.pnl} SOL`);
 
       // Save to DB via InangBase
       try {
         this.inangBase.addInang({
-          address: inang.address,
-          total_tx: inang.totalTx || 0,
+          address: inang.trader,
+          total_tx: 0, // Not available in EyeInsider event
           winrate: inang.winrate || 0,
-          total_pnl: inang.totalPnl || 0,
+          total_pnl: inang.pnl || 0,
           status: 'active'
         });
         logger.info(`[EyeOnly]    Saved to database ✓`);
 
         // Telegram notif
         await this.telegram.sendAlert(
-          `🎯 *NEW INANG DETECTED!*\n\n` +
-          `👤 Address: \`${inang.address}\`\n` +
+          `🎯 *NEW INSIDER DETECTED!*\n\n` +
+          `👤 Trader: \`${inang.trader}\`\n` +
+          `🪙 Token: ${inang.symbol} ($${(inang.mcap/1000).toFixed(1)}K)\n` +
           `📊 Winrate: *${inang.winrate?.toFixed(1) || 'N/A'}%*\n` +
-          `🔄 Trades: ${inang.totalTrades || 'N/A'}\n` +
-          `💰 Total PnL: ${inang.totalPnl?.toFixed(4) || 'N/A'} SOL\n` +
-          `📈 Avg PnL: ${inang.avgPnl?.toFixed(4) || 'N/A'} SOL\n\n` +
-          `_Passed all 4 filters (L1→L4)_`
+          `💰 PnL: ${inang.pnl?.toFixed(4) || 'N/A'} SOL\n\n` +
+          `_Mid-cap insider found_`
         );
 
       } catch (err) {
         logger.error(`[EyeOnly] Failed to save inang: ${err}`);
       }
-    });
-
-    // Handle inang yang rejected (untuk logging)
-    this.eye.on('filter_failed', (data: any) => {
-      logger.debug(`[EyeOnly] ❌ Filter failed at ${data.stage}: ${data.reason}`);
     });
   }
 
@@ -116,12 +116,12 @@ class EyeOnlyMode {
     logger.info('[EyeOnly] Shutting down gracefully...');
     
     await this.telegram.sendAlert(
-      `🛑 *EYE MODE STOPPED*\n\n` +
+      `🛑 *EYE ONLY STOPPED*\n\n` +
       `⏱️ Stopped: ${new Date().toISOString()}\n` +
-      `_Inangs saved to database_`
+      `_Insiders saved to database_`
     );
 
-    await this.eye.stop();
+    this.eye.stop();
     await closeDatabase();
     process.exit(0);
   }
