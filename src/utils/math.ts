@@ -1,6 +1,7 @@
 // Math utilities for InsectPump
 
 import { CONSTANTS } from '../config/constants';
+import { CONFIG } from '../config/config';
 
 /**
  * Calculate token price using Constant Product formula
@@ -78,7 +79,7 @@ export function sleep(ms: number): Promise<void> {
  */
 export async function retry<T>(
   fn: () => Promise<T>,
-  maxAttempts = 3,
+  maxAttempts = CONFIG.MATH_RETRY_ATTEMPTS,
   baseDelay = 1000
 ): Promise<T> {
   let lastError: Error | undefined;

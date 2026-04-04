@@ -106,7 +106,12 @@ export class Eye extends EventEmitter {
   private connect(): void {
     logger.info(`[Eye] Connecting to ${CONFIG.PUMP_PORTAL_WSS}`);
 
-    this.ws = new WebSocket(CONFIG.PUMP_PORTAL_WSS);
+    this.ws = new WebSocket(CONFIG.PUMP_PORTAL_WSS, {
+      headers: {
+        'Origin': 'https://pumpportal.fun',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
 
     this.ws.on('open', () => {
       logger.info('[Eye] WebSocket connected');
@@ -473,10 +478,10 @@ export class Eye extends EventEmitter {
     });
     
     // Bundle confirmed kalau:
-    // - 2+ time-based match ATAU
+    // - N+ time-based match ATAU
     // - Multiple wallets from same funder (connected)
-    const isBundle = timeBundle.length >= 2 || 
-                     (timeBundleWallets.length > 2 && totalUniqueFunders <= 2);
+    const isBundle = timeBundle.length >= CONFIG.BUNDLE_MIN_WALLETS || 
+                     (timeBundleWallets.length > CONFIG.BUNDLE_CONNECTED_WALLETS && totalUniqueFunders <= CONFIG.BUNDLE_MAX_FUNDERS);
     
     return {
       isBundle,
@@ -602,8 +607,8 @@ export class Eye extends EventEmitter {
     // Add new data point
     history.push({ mcap, ts: now });
 
-    // Keep only last 10 data points (or last 2 minutes)
-    const cutoff = now - 2 * 60 * 1000;
+    // Keep only last 10 data points (or last history window)
+    const cutoff = now - CONFIG.EYE_HISTORY_WINDOW_MS;
     while (history.length > 0 && history[0].ts < cutoff) {
       history.shift();
     }
@@ -624,8 +629,8 @@ export class Eye extends EventEmitter {
     const latest = history[history.length - 1];
     const timeDiff = (latest.ts - oldest.ts) / 1000; // seconds
 
-    // Need at least 30 seconds of data
-    if (timeDiff < 30) return null;
+    // Need at least minimum time window for valid calculation
+    if (timeDiff < CONFIG.MIN_GROWTH_TIME_WINDOW_SEC) return null;
 
     const growth = ((latest.mcap - oldest.mcap) / oldest.mcap) * 100;
     

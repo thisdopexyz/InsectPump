@@ -62,17 +62,17 @@ export const CONFIG = {
   // TX limit buat winrate calc (higher = lebih akurat, lebih mahal)
   HELIUS_L3_LIMIT: 50,               // 50 TX = ~2-3 credits
   
-  // Filter trading activity (MODE 2: MODERATE - balanced quality)
-  MIN_TRADING_ACTIVITY: 2,           // Min 2 swaps - some activity required
-  MIN_WINRATE_PERCENT: 30,             // Min 30% winrate - minimum profitable
-  MIN_COMPLETED_TRADES: 1,             // Min 1 round-trip - must have closed trade
+  // Filter trading activity (MODE: STRICT - high quality)
+  MIN_TRADING_ACTIVITY: 10,          // Min 10 swaps - high activity required
+  MIN_WINRATE_PERCENT: 40,             // Min 40% winrate - strict quality
+  MIN_COMPLETED_TRADES: 3,             // Min 3 round-trip - proven track record
   MIN_BUY_SIZE_SOL: 0.01,              // Skip dust buys < 0.01 SOL
   SKIP_SELL_ONLY_WALLETS: true,        // Skip wallet sell-only
   
   // ============================================================================
   // STRATEGI: ALCHEMY FILTER (L2)
   // ============================================================================
-  MIN_TOTAL_TX: 100,                   // Filter burn/dev wallets
+  MIN_TOTAL_TX: 50,                    // Filter burn/dev wallets (was 100)
   
   // ============================================================================
   // EXECUTION: PRIORITY FEE
@@ -129,6 +129,53 @@ export const CONFIG = {
   BUY_FAIL_BLOCK_MS: 600000,           // 10 menit block kalo buy fail
   DASHBOARD_INTERVAL_MS: 30000,        // 30 detik update dashboard
   CACHE_CLEANUP_INTERVAL_MS: 300000,   // 5 menit cleanup cache
+  
+  // ============================================================================
+  // INTERNAL TIMING & THRESHOLDS (was hardcoded)
+  // ============================================================================
+  INANG_CLEANUP_INTERVAL_MS: 6 * 60 * 60 * 1000,  // 6 jam cleanup inang entries
+  INANG_ENTRY_MAX_AGE_MS: 7 * 24 * 60 * 60 * 1000, // 7 hari max age inang entry
+  EYE_HISTORY_WINDOW_MS: 2 * 60 * 1000,           // 2 menit history window for pumping
+  MIN_SOL_CHANGE_THRESHOLD: 0.0001,               // 0.0001 SOL threshold for buy/sell detection
+  
+  // Bundle detection thresholds
+  BUNDLE_MIN_WALLETS: 2,               // Min 2 wallets = potential bundle
+  BUNDLE_CONNECTED_WALLETS: 2,         // Min connected wallets for same-funder bundle
+  BUNDLE_MAX_FUNDERS: 2,             // Max unique funders = connected wallet bundle
+  
+  // API Service limits (was hardcoded)
+  HELIUS_TX_HISTORY_LIMIT: 100,        // Helius tx history fetch limit
+  HELIUS_PARSE_LIMIT: 20,                // Helius signature parse limit (performance)
+  ALCHEMY_TRANSFER_LIMIT: 100,           // Alchemy asset transfer limit
+  ALCHEMY_L2_SIGNATURE_LIMIT: 20,        // Alchemy L2 filter signature fetch
+  TELEGRAM_POLL_LIMIT: 10,               // Telegram getUpdates limit
+  
+  // Wallet Health Check (was hardcoded)
+  WALLET_HEALTH_SIG_LIMIT: 10,           // Signature fetch limit for health check
+  WALLET_HEALTH_WINDOW_SEC: 300,         // Recent failed tx window (5 min)
+  WALLET_HEALTH_MAX_FAIL: 3,             // Max allowed failures in window
+  
+  // Pump.fun Detection (was hardcoded)
+  PUMP_TRADER_MIN_TRADES: 10,            // Min trades to qualify as pump trader
+  
+  // Helius/Alchemy Fetch Limits (was hardcoded)
+  HELIUS_TX_SIGNATURE_LIMIT: 1000,       // Helius signature fetch for L1
+  HELIUS_SWAP_SIGNATURE_LIMIT: 100,      // Helius signature fetch for L3 swaps
+  
+  // Growth Calculation (was hardcoded)
+  MIN_GROWTH_TIME_WINDOW_SEC: 30,        // Min seconds for valid growth calc
+  
+  // Retry & Fee Settings (was hardcoded)
+  MATH_RETRY_ATTEMPTS: 3,                // Max retry attempts for retry()
+  PRIORITY_FEE_MAX_SOL: 0.01,            // Max priority fee cap (safety) - 0.01 SOL max
+  TX_SEND_MAX_RETRIES: 3,                // Max retries for sendTransaction
+  
+  // Trading & Fee (was hardcoded)
+  PUMP_PORTAL_FEE_SOL: 0.0018,           // PumpPortal fee per trade
+  
+  // Bot Detection (was hardcoded)
+  BOT_VARIANCE_THRESHOLD: 10,            // Max variance in seconds (bot pattern)
+  BOT_INTERVAL_THRESHOLD: 300,           // Max avg interval in seconds (5 min)
   
   // ============================================================================
   // TOKEN PROTECTION

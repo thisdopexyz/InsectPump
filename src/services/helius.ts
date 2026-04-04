@@ -79,7 +79,7 @@ export class HeliusClient {
   }
 
   // Get transaction history
-  async getTransactionHistory(address: string, limit: number = 100): Promise<any[]> {
+  async getTransactionHistory(address: string, limit: number = CONFIG.HELIUS_TX_HISTORY_LIMIT): Promise<any[]> {
     try {
       const response = await axios.post(this.baseUrl, {
         jsonrpc: '2.0',
@@ -91,7 +91,7 @@ export class HeliusClient {
       const signatures = response.data.result || [];
       const txs = [];
 
-      for (const sig of signatures.slice(0, 20)) { // Parse top 20
+      for (const sig of signatures.slice(0, CONFIG.HELIUS_PARSE_LIMIT)) { // Parse limit for performance
         try {
           const txResponse = await axios.post(this.baseUrl, {
             jsonrpc: '2.0',

@@ -8,9 +8,14 @@ interface TelegramConfig {
   enabled: boolean;
 }
 
+type CommandHandler = (command: string, args: string[]) => void;
+
 export class TelegramService {
   private config: TelegramConfig;
   private baseUrl: string;
+  private lastUpdateId: number = 0;
+  private commandHandlers: Map<string, CommandHandler> = new Map();
+  private pollingInterval: NodeJS.Timeout | null = null;
 
   constructor() {
     // Get Token and ChatID from CONFIG (which reads from .env)
@@ -27,6 +32,123 @@ export class TelegramService {
     } else {
       logger.warn('[Telegram] Bot not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env');
     }
+  }
+
+  /**
+   * Register command handler
+   * @param command - Command name without slash (e.g., 'wallet', 'stats')
+   * @param handler - Function to call when command received
+   */
+  onCommand(command: string, handler: CommandHandler): void {
+    this.commandHandlers.set(command.toLowerCase(), handler);
+    logger.info(`[Telegram] Registered command handler: /${command}`);
+  }
+
+  /**
+   * Start polling for incoming messages/commands
+   * Call this after registering all command handlers
+   */
+  startCommandPolling(): void {
+    if (!this.config.enabled) {
+      logger.warn('[Telegram] Cannot start polling - bot not configured');
+      return;
+    }
+
+    if (this.pollingInterval) {
+      logger.warn('[Telegram] Polling already started');
+      return;
+    }
+
+    logger.info('[Telegram] Starting command polling...');
+    
+    this.pollingInterval = setInterval(async () => {
+      try {
+        await this.pollUpdates();
+      } catch (error) {
+        logger.error(`[Telegram] Polling error: ${error}`);
+      }
+    }, 5000); // Check every 5 seconds
+  }
+
+  /**
+   * Stop polling for commands
+   */
+  stopCommandPolling(): void {
+    if (this.pollingInterval) {
+      clearInterval(this.pollingInterval);
+      this.pollingInterval = null;
+      logger.info('[Telegram] Command polling stopped');
+    }
+  }
+
+  /**
+   * Poll for new updates from Telegram
+   */
+  private async pollUpdates(): Promise<void> {
+    try {
+      const response = await axios.get(`${this.baseUrl}/getUpdates`, {
+        params: {
+          offset: this.lastUpdateId + 1,
+          limit: CONFIG.TELEGRAM_POLL_LIMIT,
+          timeout: 0
+        }
+      });
+
+      if (!response.data.ok) {
+        return;
+      }
+
+      const updates = response.data.result;
+      
+      for (const update of updates) {
+        this.lastUpdateId = update.update_id;
+        
+        // Only process messages from configured chat
+        if (!update.message || !update.message.text) continue;
+        
+        const chatId = update.message.chat?.id?.toString();
+        if (chatId !== this.config.chatId) {
+          logger.warn(`[Telegram] Ignoring message from unauthorized chat: ${chatId}`);
+          continue;
+        }
+
+        const text = update.message.text.trim();
+        
+        // Parse command
+        if (text.startsWith('/')) {
+          const parts = text.substring(1).split(' ');
+          const command = parts[0].toLowerCase();
+          const args = parts.slice(1);
+          
+          logger.info(`[Telegram] Received command: /${command} from chat ${chatId}`);
+          
+          const handler = this.commandHandlers.get(command);
+          if (handler) {
+            handler(command, args);
+          } else {
+            // Unknown command - send help
+            this.sendHelp();
+          }
+        }
+      }
+    } catch (error: any) {
+      if (!error.message?.includes('timeout')) {
+        logger.error(`[Telegram] Get updates error: ${error.message}`);
+      }
+    }
+  }
+
+  /**
+   * Send help message with available commands
+   */
+  private async sendHelp(): Promise<void> {
+    const commands = Array.from(this.commandHandlers.keys()).map(cmd => `/${cmd}`).join(', ');
+    const message = 
+      `ℹ️ *Available Commands*\n\n` +
+      `${commands || 'No commands registered'}\n\n` +
+      `Use any command above to get info.`
+    ;
+    await this.sendAlert(message);
   }
 
   /**
@@ -212,6 +334,77 @@ export class TelegramService {
    */
   getChatId(): string {
     return this.config.chatId;
+  }
+
+  /**
+   * Template: Wallet stats report (on-demand)
+   * @param walletInfo - Wallet info from WalletManager
+   * @param openTrades - List of open trades/holdings
+   */
+  async notifyWalletReport(
+    walletInfo: {
+      address: string;
+      solBalance: number;
+      tokenCount: number;
+      trading?: {
+        totalSpentSOL: number;
+        lockedSOL: number;
+        availableSOL: number;
+        realizedPnLSOL: number;
+        todayPnLSOL: number;
+        totalTrades: number;
+        openTrades: number;
+        winRate: number;
+      };
+    },
+    openTrades: Array<{
+      token_symbol: string;
+      entry_price: number;
+      highest_price: number;
+      is_trailing_active: number;
+    }>
+  ): Promise<boolean> {
+    const t = walletInfo.trading;
+    const pnlEmoji = (t?.realizedPnLSOL || 0) >= 0 ? '🟢' : '🔴';
+    const todayEmoji = (t?.todayPnLSOL || 0) >= 0 ? '📈' : '📉';
+    
+    let message = 
+      `💼 *WALLET REPORT*\n\n` +
+      `👤 Address: \`${walletInfo.address.substring(0, 16)}...\`\n` +
+      `💰 SOL Balance: ${walletInfo.solBalance.toFixed(4)} SOL\n` +
+      `🪙 Token Holdings: ${walletInfo.tokenCount}\n\n`
+    ;
+
+    if (t && t.totalTrades > 0) {
+      message +=
+        `📊 *Trading Stats*\n` +
+        `Total Spent: ${t.totalSpentSOL.toFixed(4)} SOL\n` +
+        `Locked: ${t.lockedSOL.toFixed(4)} SOL | Available: ${t.availableSOL.toFixed(4)} SOL\n` +
+        `${pnlEmoji} Realized PnL: ${t.realizedPnLSOL >= 0 ? '+' : ''}${t.realizedPnLSOL.toFixed(4)} SOL\n` +
+        `${todayEmoji} Today PnL: ${t.todayPnLSOL >= 0 ? '+' : ''}${t.todayPnLSOL.toFixed(4)} SOL\n` +
+        `Trades: ${t.totalTrades} total | ${t.openTrades} open\n` +
+        `Win Rate: ${t.winRate.toFixed(1)}%\n\n`
+      ;
+    }
+
+    // Show current holdings
+    if (openTrades.length > 0) {
+      message += `📋 *Current Holdings (${openTrades.length})*\n`;
+      
+      openTrades.slice(0, 10).forEach((trade, idx) => {
+        const trailing = trade.is_trailing_active ? '🟢' : '⏸️';
+        const symbol = trade.token_symbol || 'UNKNOWN';
+        message += `${idx + 1}. \`${symbol}\` @ ${trade.entry_price.toFixed(6)} ${trailing}\n`;
+      });
+      
+      if (openTrades.length > 10) {
+        message += `... and ${openTrades.length - 10} more\n`;
+      }
+    } else {
+      message += `📋 *No open positions*\n`;
+    }
+
+    return this.sendAlert(message);
   }
 }
 

@@ -54,7 +54,7 @@ export class AlchemyClient {
   }
 
   // Get asset transfers (menggantikan getTransactions yang deprecated)
-  async getAssetTransfers(address: string, limit: number = 100): Promise<AssetTransfer[]> {
+  async getAssetTransfers(address: string, limit: number = CONFIG.ALCHEMY_TRANSFER_LIMIT): Promise<AssetTransfer[]> {
     try {
       // Alchemy v2 method
       const response = await axios.post(this.baseUrl, {
@@ -170,7 +170,7 @@ export class AlchemyClient {
   }
 
   // Check if address is active on Pump.fun
-  async isPumpTrader(address: string, minTrades: number = 10): Promise<boolean> {
+  async isPumpTrader(address: string, minTrades: number = CONFIG.PUMP_TRADER_MIN_TRADES): Promise<boolean> {
     const analysis = await this.analyzeInangHistory(address);
     return analysis.pumpTx >= minTrades;
   }

@@ -54,8 +54,8 @@ if (logToFile) {
     new winston.transports.File({
       filename: path.join(logsDir, 'combined.log'),
       format: customFormat,
-      maxsize: 104857600, // 100MB max file size
-      maxFiles: 10,        // Keep 10 backup files = 1GB total limit
+      maxsize: CONFIG.LOG_MAX_SIZE_BYTES,
+      maxFiles: CONFIG.LOG_MAX_FILES,
     }),
     // Separate error log file
     new winston.transports.File({

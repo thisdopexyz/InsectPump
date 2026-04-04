@@ -29,7 +29,7 @@ export class PriorityFeeService {
   private lastFee: FeeCache | null = null;
   private readonly CACHE_TTL_MS = CONFIG.FEE_CACHE_TTL_SECONDS * 1000;
   private readonly DEFAULT_FEE = CONFIG.FEE_TIER_URGENT; // Use CONFIG urgent tier
-  private readonly MAX_FEE = 0.1; // 0.1 SOL max cap (safety limit)
+  private readonly MAX_FEE = CONFIG.PRIORITY_FEE_MAX_SOL; // Max cap (safety limit)
   private readonly MIN_FEE = CONFIG.FEE_TIER_NORMAL; // Use CONFIG normal tier
 
   constructor(heliusApiKey: string) {

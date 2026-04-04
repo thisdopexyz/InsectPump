@@ -39,7 +39,7 @@ interface TradeResult {
 
 // PumpPortal API Constants
 const PUMP_PORTAL_API = 'https://pumpportal.fun/api/trade-local';
-const PUMP_PORTAL_FEE_SOL = 0.0018; // Fee charged by PumpPortal per trade
+const PUMP_PORTAL_FEE_SOL = CONFIG.PUMP_PORTAL_FEE_SOL; // Fee charged by PumpPortal per trade
 
 // Program IDs (for reference)
 const PUMP_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
@@ -324,7 +324,7 @@ export class TradeEngine {
 
       // Send via Helius RPC
       const signature = await this.connection.sendTransaction(transaction, {
-        maxRetries: 3,
+        maxRetries: CONFIG.TX_SEND_MAX_RETRIES,
         skipPreflight: false,
         preflightCommitment: 'confirmed',
       });
@@ -405,7 +405,7 @@ export class TradeEngine {
 
       // Send via Helius RPC
       const signature = await this.connection.sendTransaction(transaction, {
-        maxRetries: 3,
+        maxRetries: CONFIG.TX_SEND_MAX_RETRIES,
         skipPreflight: false,
         preflightCommitment: 'confirmed',
       });

@@ -53,7 +53,7 @@ export class Analyzer {
       // Get signatures - Alchemy free tier handles this well
       const signatures = await this.alchemyConnection.getSignaturesForAddress(
         publicKey,
-        { limit: 1000 }
+        { limit: CONFIG.HELIUS_TX_SIGNATURE_LIMIT }
       );
 
       const txCount = signatures.length;
@@ -232,7 +232,7 @@ export class Analyzer {
         }
 
         // BUY: SOL keluar (-), token masuk (+)
-        if (solChange < -0.0001 && tokenIn > 0 && tokenOut === 0) {
+        if (solChange < -CONFIG.MIN_SOL_CHANGE_THRESHOLD && tokenIn > 0 && tokenOut === 0) {
           tradeEvents.push({
             type: 'buy',
             timestamp: swap.timestamp,
@@ -243,7 +243,7 @@ export class Analyzer {
           });
         }
         // SELL: SOL masuk (+), token keluar (-)
-        else if (solChange > 0.0001 && tokenOut > 0 && tokenIn === 0) {
+        else if (solChange > CONFIG.MIN_SOL_CHANGE_THRESHOLD && tokenOut > 0 && tokenIn === 0) {
           tradeEvents.push({
             type: 'sell',
             timestamp: swap.timestamp,
@@ -491,7 +491,7 @@ export class Analyzer {
       const publicKey = new PublicKey(wallet);
       const signatures = await this.alchemyConnection.getSignaturesForAddress(
         publicKey,
-        { limit: 100 }
+        { limit: CONFIG.HELIUS_SWAP_SIGNATURE_LIMIT }
       );
       
       return {

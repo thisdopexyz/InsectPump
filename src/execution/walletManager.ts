@@ -117,14 +117,14 @@ export class WalletManager {
       // Check for recent failed transactions
       const signatures = await this.connection.getSignaturesForAddress(
         new PublicKey(this.walletAddress),
-        { limit: 10 }
+        { limit: CONFIG.WALLET_HEALTH_SIG_LIMIT }
       );
       
       const recentFailed = signatures.filter(sig => 
-        sig.err && (Date.now() / 1000 - (sig.blockTime || 0)) < 300 // Last 5 min
+        sig.err && (Date.now() / 1000 - (sig.blockTime || 0)) < CONFIG.WALLET_HEALTH_WINDOW_SEC
       );
       
-      return recentFailed.length < 3; // Allow some failures
+      return recentFailed.length < CONFIG.WALLET_HEALTH_MAX_FAIL; // Allow some failures
     } catch (error) {
       return true; // Assume healthy if can't check
     }

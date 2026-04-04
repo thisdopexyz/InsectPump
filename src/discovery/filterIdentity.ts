@@ -97,7 +97,7 @@ export class FilterIdentity {
       // Alchemy free tier = unlimited getSignaturesForAddress
       const signatures = await this.alchemyConnection.getSignaturesForAddress(
         publicKey, 
-        { limit: 20 }
+        { limit: CONFIG.ALCHEMY_L2_SIGNATURE_LIMIT }
       );
 
       if (!signatures || signatures.length === 0) {
@@ -142,7 +142,7 @@ export class FilterIdentity {
         ) / intervals.length;
         
         // If variance is very low and avg interval is regular, likely bot
-        if (variance < 10 && avgInterval < 300) { // < 10s variance, < 5 min avg
+        if (variance < CONFIG.BOT_VARIANCE_THRESHOLD && avgInterval < CONFIG.BOT_INTERVAL_THRESHOLD) { // Low variance + regular intervals = bot
           this.addToBlacklist(wallet);
           return { passed: false, reason: 'Bot pattern detected (regular intervals)' };
         }
