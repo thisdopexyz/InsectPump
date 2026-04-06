@@ -35,7 +35,9 @@ export class FilterIdentity {
         const data = fs.readFileSync(this.blacklistPath, 'utf-8');
         const blacklist = JSON.parse(data);
         if (Array.isArray(blacklist.wallets)) {
-          this.blacklistSet = new Set(blacklist.wallets.map((w: string) => w.toLowerCase()));
+          // PRESERVE case - base58 addresses are case-sensitive! 
+          // Lowercasing can create invalid addresses (e.g., 'L' becomes 'l' which is invalid)
+          this.blacklistSet = new Set(blacklist.wallets);
         }
       } else {
         // Create default blacklist file
@@ -50,10 +52,12 @@ export class FilterIdentity {
 
   private addToBlacklist(wallet: string): void {
     try {
-      const walletLower = wallet.toLowerCase();
+      // PRESERVE case - base58 addresses are case-sensitive!
+      // Lowercasing can create invalid addresses (e.g., 'L' becomes 'l' which is invalid in base58)
+      const walletKey = wallet;
       
       // Add to memory
-      this.blacklistSet.add(walletLower);
+      this.blacklistSet.add(walletKey);
       
       // Persist to file
       let data = { wallets: [] as string[] };
@@ -62,8 +66,8 @@ export class FilterIdentity {
         data = JSON.parse(fileContent);
       }
       
-      if (!data.wallets.includes(walletLower)) {
-        data.wallets.push(walletLower);
+      if (!data.wallets.includes(walletKey)) {
+        data.wallets.push(walletKey);
         fs.writeFileSync(this.blacklistPath, JSON.stringify(data, null, 2));
         console.log(`[FilterIdentity] 🚫 Added to blacklist: ${wallet}`);
       }
@@ -83,10 +87,11 @@ export class FilterIdentity {
    * Zero Helius credits used!
    */
   public async filterIdentity(wallet: string): Promise<FilterResult> {
-    const walletLower = wallet.toLowerCase();
+    // PRESERVE case - base58 addresses are case-sensitive! Never lowercase.
+    const walletKey = wallet;
     
     // === Layer 1: Blacklist check ===
-    if (this.blacklistSet.has(walletLower)) {
+    if (this.blacklistSet.has(walletKey)) {
       return { passed: false, reason: 'Blacklisted' };
     }
 

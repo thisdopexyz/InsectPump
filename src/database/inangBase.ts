@@ -25,7 +25,8 @@ export class InangBase {
   private dbPath: string;
 
   constructor(dbPath?: string) {
-    this.dbPath = dbPath || path.join(process.cwd(), 'data', 'insectpump.db');
+    // HARDCODED: Always use absolute path to avoid cwd issues
+    this.dbPath = dbPath || '/home/ubuntu/InsectPump/data/insectpump.db';
     this.db = new Database(this.dbPath);
     this.init();
   }
@@ -58,13 +59,34 @@ export class InangBase {
    * Add new inang or update existing (upsert)
    * Logs when new inang is added
    */
+  /**
+   * Validate Solana base58 address
+   * Rules: 32-44 chars, no 0/O/I/l
+   */
+  private isValidSolanaAddress(address: string): boolean {
+    if (!address || address.length < 32 || address.length > 44) return false;
+    
+    // Base58 charset: 1-9, A-H, J-N, P-Z, a-k, m-z
+    // Forbidden: 0, O, I, l
+    const validBase58 = /^[1-9A-HJ-NP-Za-km-z]+$/;
+    return validBase58.test(address);
+  }
+
   public addInang(data: InangData): { success: boolean; isNew: boolean; id?: number } {
     try {
       const { address, winrate, total_pnl, total_tx, status = 'active', last_trade_at } = data;
-      const addressLower = address.toLowerCase();
+      
+      // Validate address BEFORE any processing
+      if (!this.isValidSolanaAddress(address)) {
+        logger.error(`[InangBase] INVALID address rejected: ${address} (contains 0/O/I/l or wrong length)`);
+        return { success: false, isNew: false };
+      }
+      
+      // PRESERVE original case - base58 is case-sensitive!
+      const addressNormalized = address;
 
       // Check if exists
-      const existing = this.db.prepare('SELECT id FROM inangs WHERE address = ?').get(addressLower);
+      const existing = this.db.prepare('SELECT id FROM inangs WHERE address = ?').get(addressNormalized);
 
       if (existing) {
         // Update existing
@@ -74,7 +96,7 @@ export class InangBase {
               status = ?, last_trade_at = COALESCE(?, last_trade_at)
           WHERE address = ?
         `;
-        this.db.prepare(updateSQL).run(winrate, total_pnl, total_tx, status, last_trade_at, addressLower);
+        this.db.prepare(updateSQL).run(winrate, total_pnl, total_tx, status, last_trade_at, addressNormalized);
         
         logger.info(`[InangBase] Updated inang: ${address} (Winrate: ${winrate.toFixed(2)}%, PnL: ${total_pnl.toFixed(4)} SOL)`);
         
@@ -85,7 +107,7 @@ export class InangBase {
           INSERT INTO inangs (address, winrate, total_pnl, total_tx, status, last_trade_at)
           VALUES (?, ?, ?, ?, ?, ?)
         `;
-        const result = this.db.prepare(insertSQL).run(addressLower, winrate, total_pnl, total_tx, status, last_trade_at);
+        const result = this.db.prepare(insertSQL).run(addressNormalized, winrate, total_pnl, total_tx, status, last_trade_at);
         
         logger.info(`[InangBase] New inang discovered: ${address} (Winrate: ${winrate.toFixed(2)}%, PnL: ${total_pnl.toFixed(4)} SOL)`);
         
@@ -99,11 +121,12 @@ export class InangBase {
 
   /**
    * Quick check if wallet exists in database
+   * NOTE: Address must be valid base58 (checked by addInang)
    */
   public isInangExists(address: string): boolean {
     try {
-      const addressLower = address.toLowerCase();
-      const result = this.db.prepare('SELECT 1 FROM inangs WHERE address = ?').get(addressLower);
+      // PRESERVE case - base58 is case-sensitive!
+      const result = this.db.prepare('SELECT 1 FROM inangs WHERE address = ?').get(address);
       return !!result;
     } catch (error) {
       logger.error(`[InangBase] Error checking existence for ${address}: ${error}`);
@@ -113,11 +136,12 @@ export class InangBase {
 
   /**
    * Get inang by address
+   * NOTE: Address must be valid base58 (checked by addInang)
    */
   public getInang(address: string): any | null {
     try {
-      const addressLower = address.toLowerCase();
-      return this.db.prepare('SELECT * FROM inangs WHERE address = ?').get(addressLower) || null;
+      // PRESERVE case - base58 is case-sensitive!
+      return this.db.prepare('SELECT * FROM inangs WHERE address = ?').get(address) || null;
     } catch (error) {
       logger.error(`[InangBase] Error getting inang ${address}: ${error}`);
       return null;
@@ -151,11 +175,12 @@ export class InangBase {
 
   /**
    * Update status of an inang (e.g., 'blacklisted', 'paused', 'active')
+   * NOTE: Address must be valid base58
    */
   public updateStatus(address: string, status: string): boolean {
     try {
-      const addressLower = address.toLowerCase();
-      const result = this.db.prepare('UPDATE inangs SET status = ? WHERE address = ?').run(status, addressLower);
+      // PRESERVE case - base58 is case-sensitive!
+      const result = this.db.prepare('UPDATE inangs SET status = ? WHERE address = ?').run(status, address);
       
       if (result.changes > 0) {
         logger.info(`[InangBase] Updated status for ${address}: ${status}`);
@@ -192,11 +217,12 @@ export class InangBase {
 
   /**
    * Update last trade timestamp
+   * NOTE: Address must be valid base58
    */
   public updateLastTrade(address: string): boolean {
     try {
-      const addressLower = address.toLowerCase();
-      const result = this.db.prepare('UPDATE inangs SET last_trade_at = CURRENT_TIMESTAMP WHERE address = ?').run(addressLower);
+      // PRESERVE case - base58 is case-sensitive!
+      const result = this.db.prepare('UPDATE inangs SET last_trade_at = CURRENT_TIMESTAMP WHERE address = ?').run(address);
       return result.changes > 0;
     } catch (error) {
       logger.error(`[InangBase] Error updating last trade for ${address}: ${error}`);
@@ -206,11 +232,12 @@ export class InangBase {
 
   /**
    * Delete inang (rarely used, prefer status update)
+   * NOTE: Address must be valid base58
    */
   public deleteInang(address: string): boolean {
     try {
-      const addressLower = address.toLowerCase();
-      const result = this.db.prepare('DELETE FROM inangs WHERE address = ?').run(addressLower);
+      // PRESERVE case - base58 is case-sensitive!
+      const result = this.db.prepare('DELETE FROM inangs WHERE address = ?').run(address);
       
       if (result.changes > 0) {
         logger.info(`[InangBase] Deleted inang: ${address}`);

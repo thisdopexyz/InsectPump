@@ -40,6 +40,81 @@ export class Analyzer {
   }
 
   /**
+   * Check if a swap transaction is PumpFun-related
+   * Filters out Jupiter, Raydium, Orca swaps - only count PumpFun trades
+   */
+  private isPumpFunRelated(swap: any, wallet: string): boolean {
+    // Check 1: Token mint ends with .pump
+    const tokenTransfers = swap.tokenTransfers || [];
+    for (const tt of tokenTransfers) {
+      const mint = tt.mint || '';
+      // Skip wrapped SOL
+      if (mint === 'So11111111111111111111111111111111111111112') continue;
+      
+      // If any token mint ends with 'pump', it's a PumpFun token
+      if (mint.endsWith('pump')) {
+        return true;
+      }
+    }
+
+    // Check 2: Look at swap source/program from Helius metadata
+    const swapSource = swap.source || '';
+    const programId = swap.programId || '';
+    const feePayer = swap.feePayer || '';
+    
+    // PumpFun program ID and related identifiers
+    const pumpFunIdentifiers = [
+      '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P', // PumpFun program
+      'pump', 
+      'PUMP',
+      'pump.fun',
+      'PUMP_FUN'
+    ];
+    
+    for (const identifier of pumpFunIdentifiers) {
+      if (swapSource.includes(identifier) || 
+          programId.includes(identifier) ||
+          swapSource.toLowerCase().includes('pump') ||
+          programId.toLowerCase().includes('pump')) {
+        return true;
+      }
+    }
+
+    // Check 3: Description field often contains DEX info
+    const description = swap.description || '';
+    if (description.toLowerCase().includes('pump.fun') || 
+        description.toLowerCase().includes('pumpfun')) {
+      return true;
+    }
+
+    // Check 4: Look at instructions for PumpFun program calls
+    const instructions = swap.instructions || swap.parsedInstructions || [];
+    for (const ix of instructions) {
+      const program = ix.programId || ix.program || '';
+      if (program === '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P' ||
+          program.includes('pump') ||
+          program.includes('PUMP')) {
+        return true;
+      }
+    }
+
+    // Check 5: Inner instructions (often contains the actual DEX program)
+    const innerInstructions = swap.innerInstructions || [];
+    for (const inner of innerInstructions) {
+      for (const ix of (inner.instructions || [])) {
+        const program = ix.programId || ix.program || '';
+        if (program === '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P' ||
+            program.includes('pump') ||
+            program.includes('PUMP')) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /**
    * Layer 2: Check total transaction count via Alchemy (FREE)
    * Fail kalau < 100 transactions (dompet baru/bot/dev)
    * 
@@ -195,6 +270,8 @@ export class Analyzer {
       let winningTrades = 0;
       let losingTrades = 0;
       let totalPnl = 0;
+      let totalBuyAmountCompleted = 0;  // Track total buy amount for completed trades
+      let totalSellAmountCompleted = 0; // Track total sell amount for completed trades
       let dustBuys = 0;
       let unmatchedSells = 0;
       let validBuys = 0;
@@ -213,6 +290,13 @@ export class Analyzer {
         if (!swap.timestamp) continue;
         if (swap.transactionError) continue;
 
+        // === PUMPFUN-ONLY FILTER ===
+        // Check if this swap is PumpFun-related (not Jupiter/Raydium/Orca)
+        const isPumpFunSwap = this.isPumpFunRelated(swap, wallet);
+        if (!isPumpFunSwap) {
+          continue; // Skip non-PumpFun swaps (Jupiter, Raydium, etc.)
+        }
+
         // Get SOL change from accountData (reliable!)
         const accountData = swap.accountData || [];
         const walletData = accountData.find((a: any) => a.account === wallet);
@@ -229,6 +313,15 @@ export class Analyzer {
             tokenOut += tt.tokenAmount || 0;
             tokenMint = tt.mint;
           }
+        }
+
+        // Skip wrapped SOL (WSOL) transfers
+        if (tokenMint === 'So11111111111111111111111111111111111111112') continue;
+
+        // === TOKEN MINT FILTER ===
+        // Only count tokens with .pump suffix (PumpFun tokens)
+        if (!tokenMint.endsWith('pump')) {
+          continue; // Skip non-pump tokens
         }
 
         // BUY: SOL keluar (-), token masuk (+)
@@ -314,6 +407,8 @@ export class Analyzer {
 
           completedTrades++;
           totalPnl += pnl;
+          totalBuyAmountCompleted += proportionalBuy;
+          totalSellAmountCompleted += event.solAmount;
 
           if (pnl > 0) {
             winningTrades++;
@@ -369,7 +464,7 @@ export class Analyzer {
         };
       }
 
-      // === FILTER 4: Winrate threshold ===
+      // === FILTER 4: Winrate threshold (STRICT: 70%) ===
       if (winrate < CONFIG.MIN_WINRATE_PERCENT) {
         return {
           passed: false,
@@ -388,7 +483,32 @@ export class Analyzer {
         };
       }
 
-      // === FILTER 5: PnL must be positive (DISABLED FOR TESTING - allow 0 PnL) ===
+      // === FILTER 4.5: PnL PERCENTAGE threshold (STRICT: min 30%) ===
+      // Calculate PnL % based on total buy vs total sell for completed trades
+      const pnlPercent = totalBuyAmountCompleted > 0 
+        ? ((totalSellAmountCompleted - totalBuyAmountCompleted) / totalBuyAmountCompleted) * 100 
+        : 0;
+      
+      if (pnlPercent < CONFIG.MIN_PNL_PERCENT) {
+        return {
+          passed: false,
+          reason: `❌ REJECT L3-PnL%: ${pnlPercent.toFixed(1)}% < ${CONFIG.MIN_PNL_PERCENT}% (low skill, not worth copying)`,
+          data: {
+            swapCount,
+            completedTrades,
+            winningTrades,
+            losingTrades,
+            winrate: parseFloat(winrate.toFixed(2)),
+            pnlPercent: parseFloat(pnlPercent.toFixed(2)),
+            totalBuyAmount: parseFloat(totalBuyAmountCompleted.toFixed(4)),
+            totalSellAmount: parseFloat(totalSellAmountCompleted.toFixed(4)),
+            threshold: CONFIG.MIN_PNL_PERCENT,
+            creditsUsed
+          }
+        };
+      }
+
+      // === FILTER 5: PnL must be positive (no losing traders) ===
       if (totalPnl < 0) {
         return {
           passed: false,

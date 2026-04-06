@@ -1,0 +1,223 @@
+{
+  "version": "0.1.0",
+  "name": "pump",
+  "instructions": [
+    {
+      "name": "sell",
+      "accounts": [
+        {
+          "name": "global",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "feeRecipient",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "mint",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "bondingCurve",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "associatedBondingCurve",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "associatedUser",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "user",
+          "isMut": true,
+          "isSigner": true
+        },
+        {
+          "name": "systemProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "rent",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "eventAuthority",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "program",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Global",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "initialized",
+            "type": "bool"
+          },
+          {
+            "name": "authority",
+            "type": "publicKey"
+          },
+          {
+            "name": "feeRecipient",
+            "type": "publicKey"
+          },
+          {
+            "name": "initialVirtualTokenReserves",
+            "type": "u64"
+          },
+          {
+            "name": "initialVirtualSolReserves",
+            "type": "u64"
+          },
+          {
+            "name": "initialRealTokenReserves",
+            "type": "u64"
+          },
+          {
+            "name": "tokenTotalSupply",
+            "type": "u64"
+          },
+          {
+            "name": "feeBasisPoints",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BondingCurve",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "virtualTokenReserves",
+            "type": "u64"
+          },
+          {
+            "name": "virtualSolReserves",
+            "type": "u64"
+          },
+          {
+            "name": "realTokenReserves",
+            "type": "u64"
+          },
+          {
+            "name": "realSolReserves",
+            "type": "u64"
+          },
+          {
+            "name": "tokenTotalSupply",
+            "type": "u64"
+          },
+          {
+            "name": "complete",
+            "type": "bool"
+          }
+        ]
+      }
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "NotAuthorized",
+      "msg": "Not authorized"
+    },
+    {
+      "code": 6001,
+      "name": "AlreadyInitialized",
+      "msg": "Already initialized"
+    },
+    {
+      "code": 6002,
+      "name": "TooMuchSolRequired",
+      "msg": "Too much SOL required"
+    },
+    {
+      "code": 6003,
+      "name": "TooLittleSolReceived",
+      "msg": "Too little SOL received"
+    },
+    {
+      "code": 6004,
+      "name": "MintDoesNotMatchBondingCurve",
+      "msg": "Mint does not match bonding curve"
+    },
+    {
+      "code": 6005,
+      "name": "BondingCurveComplete",
+      "msg": "Bonding curve complete"
+    },
+    {
+      "code": 6006,
+      "name": "BondingCurveNotComplete",
+      "msg": "Bonding curve not complete"
+    },
+    {
+      "code": 6007,
+      "name": "InsufficientTokens",
+      "msg": "Insufficient tokens"
+    },
+    {
+      "code": 6008,
+      "name": "InsufficientSol",
+      "msg": "Insufficient SOL"
+    },
+    {
+      "code": 6009,
+      "name": "MaxBuyExceeded",
+      "msg": "Max buy exceeded"
+    },
+    {
+      "code": 6010,
+      "name": "MaxSellExceeded",
+      "msg": "Max sell exceeded"
+    },
+    {
+      "code": 6011,
+      "name": "MinBuyNotMet",
+      "msg": "Min buy not met"
+    },
+    {
+      "code": 6012,
+      "name": "MinSellNotMet",
+      "msg": "Min sell not met"
+    },
+    {
+      "code": 6013,
+      "name": "CalculationError",
+      "msg": "Calculation error"
+    }
+  ]
+}

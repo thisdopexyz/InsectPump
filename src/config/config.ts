@@ -26,27 +26,27 @@ export const CONFIG = {
   // STRATEGI: BUY KITA (Bot Trading)
   // ============================================================================
   // Ukuran buy kita per trade
-  OUR_BUY_SIZE_SOL: 0.1,           // Buy 0.1 SOL per position
+  OUR_BUY_SIZE_SOL: 0.008,          // Buy 0.008 SOL per position (kecil aman)
   
   // Mcap entry kita
-  OUR_MIN_MCAP_SOL: 60,              // Entry min 60 SOL mcap
-  OUR_MAX_MCAP_SOL: 300,             // Entry max 300 SOL mcap
+  OUR_MIN_MCAP_SOL: 75,              // Entry min 75 SOL mcap
+  OUR_MAX_MCAP_SOL: 3500,            // Entry max 3500 SOL mcap (bisa sampe established)
   
   // ============================================================================
   // STRATEGI: INANG/WHALE DETECTION
   // ============================================================================
   // Min buy whale yang kita anggap "inang"
-  MIN_INANG_BUY_SOL: 0.3,            // Whale buy min 0.3 SOL
+  MIN_INANG_BUY_SOL: 0.3,            // Whale buy min 0.3 SOL - strict quality filter
   MAX_INANG_BUY_SOL: 2.0,            // Whale buy max 2.0 SOL
   
   // Sniper protection: Skip buys di awal launch
-  SNIPER_WINDOW_SECONDS: 30,         // Skip 30 detik pertama
+  SNIPER_WINDOW_SECONDS: 15,         // Skip 15 detik pertama (REDUCED)
   
   // ============================================================================
   // STRATEGI: PUMPING DETECTION (After Sniper Window)
   // ============================================================================
   // Whale buy threshold (setelah 30s, min buy ini = trigger)
-  PUMP_MIN_BUY_SOL: 0.1,             // Min 0.1 SOL = whale
+  PUMP_MIN_BUY_SOL: 0.3,             // Min 0.3 SOL = whale
   PUMP_MAX_BUY_SOL: 2.0,             // Max 2.0 SOL
   
   // Market cap filter
@@ -64,15 +64,16 @@ export const CONFIG = {
   
   // Filter trading activity (MODE: STRICT - high quality)
   MIN_TRADING_ACTIVITY: 10,          // Min 10 swaps - high activity required
-  MIN_WINRATE_PERCENT: 40,             // Min 40% winrate - strict quality
+  MIN_WINRATE_PERCENT: 70,             // Min 70% winrate - STRICT (was 60%)
+  MIN_PNL_PERCENT: 30,                 // Min 30% PnL percentage (pure profit % filter)
   MIN_COMPLETED_TRADES: 3,             // Min 3 round-trip - proven track record
-  MIN_BUY_SIZE_SOL: 0.01,              // Skip dust buys < 0.01 SOL
+  MIN_BUY_SIZE_SOL: 0.1,              // Skip dust buys < 0.1 SOL
   SKIP_SELL_ONLY_WALLETS: true,        // Skip wallet sell-only
   
   // ============================================================================
   // STRATEGI: ALCHEMY FILTER (L2)
   // ============================================================================
-  MIN_TOTAL_TX: 50,                    // Filter burn/dev wallets (was 100)
+  MIN_TOTAL_TX: 100,                   // Filter burn/dev wallets (strict)
   
   // ============================================================================
   // EXECUTION: PRIORITY FEE
@@ -91,13 +92,13 @@ export const CONFIG = {
   // ============================================================================
   // EYE: PUMPING DETECTION SETTINGS
   // ============================================================================
-  EYE_MAX_TRACKED_TOKENS: 200,         // Max 200 token concurrent
+  EYE_MAX_TRACKED_TOKENS: 30,          // Max 30 token concurrent (avoid WSS overload)
   EYE_TOKEN_TTL_MINUTES: 60,           // Token expire setelah 60 menit
   EYE_MIN_TOKEN_STAY_MS: 3 * 60 * 1000, // Token stay 3 min sebelum boleh di-kick (biar whale detection sempat jalan)
   EYE_PUMP_THRESHOLD_PERCENT: 10,        // 10% growth = pumping
   EYE_CHECK_INTERVAL_SECONDS: 15,      // Check tiap 15 detik
   EYE_MIN_MCAP_TRACK_SOL: 1,             // Min 1 SOL mcap untuk tracking
-  EYE_SKIP_FIRST_N_BUYS: 5,              // Skip 5 buy pertama (sniper bundle)
+  EYE_SKIP_FIRST_N_BUYS: 20,             // Skip buyer #1-20 (anti sniper)
   EYE_BUNDLE_WINDOW_MS: 5000,            // 5 detik window bundle detection
   EYE_BUNDLE_AMOUNT_THRESHOLD_SOL: 0.1,  // 0.1 SOL threshold bundle amount
   EYE_WALLET_CACHE_TTL_MINUTES: 30,      // 30 menit wallet cache TTL
@@ -212,8 +213,8 @@ export const CONFIG = {
   // ============================================================================
   // DATABASE & LOGGING
   // ============================================================================
-  DB_PATH: process.env.DB_PATH || './data/insectpump.db',
-  BLACKLIST_PATH: process.env.BLACKLIST_PATH || './data/blacklist.json',
+  DB_PATH: process.env.DB_PATH || '/home/ubuntu/InsectPump/data/insectpump.db',
+  BLACKLIST_PATH: process.env.BLACKLIST_PATH || '/home/ubuntu/InsectPump/data/blacklist.json',
   LOG_LEVEL: process.env.LOG_LEVEL || 'info',
   LOG_TO_FILE: process.env.LOG_TO_FILE === 'true',
 };

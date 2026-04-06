@@ -5,7 +5,8 @@ import {
   TokenAccountNotFoundError,
   createAssociatedTokenAccountInstruction,
   ASSOCIATED_TOKEN_PROGRAM_ID,
-  TOKEN_PROGRAM_ID
+  TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID
 } from '@solana/spl-token';
 import { heliusClient } from '../services/helius';
 import { logger } from '../utils/logger';
@@ -133,30 +134,48 @@ export class WalletManager {
   // ==================== TOKEN MANAGEMENT ====================
 
   async hasTokenAccount(mintAddress: string): Promise<boolean> {
+    const mintPubkey = new PublicKey(mintAddress);
+    const walletPubkey = new PublicKey(this.walletAddress);
+    
+    // Try SPL Token program first
     try {
-      const ata = await getAssociatedTokenAddress(
-        new PublicKey(mintAddress),
-        new PublicKey(this.walletAddress)
-      );
-      
+      const ata = await getAssociatedTokenAddress(mintPubkey, walletPubkey, false, TOKEN_PROGRAM_ID);
       await getAccount(this.connection, ata);
       return true;
     } catch (error) {
-      if (error instanceof TokenAccountNotFoundError) {
+      if (!(error instanceof TokenAccountNotFoundError)) {
         return false;
       }
+    }
+    
+    // Try Token-2022 program
+    try {
+      const ata = await getAssociatedTokenAddress(mintPubkey, walletPubkey, false, TOKEN_2022_PROGRAM_ID);
+      await getAccount(this.connection, ata);
+      return true;
+    } catch (error) {
       return false;
     }
   }
 
   async getTokenAccountAddress(mintAddress: string): Promise<string | null> {
+    const mintPubkey = new PublicKey(mintAddress);
+    const walletPubkey = new PublicKey(this.walletAddress);
+    
+    // Try SPL Token program first
     try {
-      const ata = await getAssociatedTokenAddress(
-        new PublicKey(mintAddress),
-        new PublicKey(this.walletAddress)
-      );
+      const ata = await getAssociatedTokenAddress(mintPubkey, walletPubkey, false, TOKEN_PROGRAM_ID);
+      await getAccount(this.connection, ata);
       return ata.toBase58();
-    } catch (error) {
+    } catch {
+      // Try Token-2022 program
+    }
+    
+    try {
+      const ata = await getAssociatedTokenAddress(mintPubkey, walletPubkey, false, TOKEN_2022_PROGRAM_ID);
+      await getAccount(this.connection, ata);
+      return ata.toBase58();
+    } catch {
       return null;
     }
   }
@@ -164,8 +183,37 @@ export class WalletManager {
   // ==================== ATA MANAGEMENT ====================
 
   /**
+   * Detect which token program a mint uses (SPL or Token-2022)
+   * Returns the programId or null if mint not found
+   */
+  async detectTokenProgram(mintAddress: string): Promise<PublicKey | null> {
+    try {
+      const mintPubkey = new PublicKey(mintAddress);
+      const mintInfo = await this.connection.getAccountInfo(mintPubkey);
+      
+      if (!mintInfo) {
+        return null;
+      }
+      
+      // Check owner of mint account
+      const owner = mintInfo.owner.toBase58();
+      
+      if (owner === TOKEN_PROGRAM_ID.toBase58()) {
+        return TOKEN_PROGRAM_ID;
+      } else if (owner === TOKEN_2022_PROGRAM_ID.toBase58()) {
+        return TOKEN_2022_PROGRAM_ID;
+      }
+      
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Get or create Associated Token Account (ATA)
    * Returns the ATA address (creates if doesn't exist)
+   * Supports BOTH SPL Token and Token-2022
    */
   async getOrCreateATA(mintAddress: string): Promise<{ 
     success: boolean; 
@@ -173,17 +221,29 @@ export class WalletManager {
     created?: boolean; 
     error?: string;
     signature?: string;
+    programId?: string;
   }> {
     try {
       const mintPubkey = new PublicKey(mintAddress);
       const walletPubkey = new PublicKey(this.walletAddress);
       
-      // Derive ATA address
+      // Detect which token program this mint uses
+      const tokenProgram = await this.detectTokenProgram(mintAddress);
+      
+      if (!tokenProgram) {
+        // Default to SPL Token if can't detect
+        logger.warn(`[WalletManager] Could not detect token program for ${mintAddress.substring(0, 12)}..., defaulting to SPL Token`);
+      }
+      
+      const programId = tokenProgram || TOKEN_PROGRAM_ID;
+      const programType = programId.equals(TOKEN_2022_PROGRAM_ID) ? 'Token-2022' : 'SPL';
+      
+      // Derive ATA address with correct programId
       const ata = await getAssociatedTokenAddress(
         mintPubkey,
         walletPubkey,
         false, // allowOwnerOffCurve
-        TOKEN_PROGRAM_ID,
+        programId,
         ASSOCIATED_TOKEN_PROGRAM_ID
       );
       
@@ -192,12 +252,12 @@ export class WalletManager {
       // Check if ATA exists
       try {
         await getAccount(this.connection, ata);
-        logger.info(`[WalletManager] ATA exists: ${ataAddress.substring(0, 12)}...`);
-        return { success: true, ataAddress, created: false };
+        logger.info(`[WalletManager] ${programType} ATA exists: ${ataAddress.substring(0, 12)}...`);
+        return { success: true, ataAddress, created: false, programId: programId.toBase58() };
       } catch (error) {
         if (error instanceof TokenAccountNotFoundError) {
           // ATA doesn't exist, need to create
-          logger.info(`[WalletManager] Creating ATA for ${mintAddress.substring(0, 12)}...`);
+          logger.info(`[WalletManager] Creating ${programType} ATA for ${mintAddress.substring(0, 12)}...`);
           
           // Get wallet keypair from private key
           if (!CONFIG.PRIVATE_KEY) {
@@ -207,14 +267,14 @@ export class WalletManager {
           const secretKey = bs58.decode(CONFIG.PRIVATE_KEY);
           const keypair = Keypair.fromSecretKey(secretKey);
           
-          // Build transaction to create ATA
+          // Build transaction to create ATA with correct programId
           const tx = new Transaction();
           const createAtaIx = createAssociatedTokenAccountInstruction(
             walletPubkey, // payer
             ata, // associated token account
             walletPubkey, // owner
             mintPubkey, // mint
-            TOKEN_PROGRAM_ID,
+            programId, // CORRECT token program (SPL or Token-2022)
             ASSOCIATED_TOKEN_PROGRAM_ID
           );
           tx.add(createAtaIx);
@@ -234,8 +294,8 @@ export class WalletManager {
           // Wait for confirmation
           await this.connection.confirmTransaction(signature, 'confirmed');
           
-          logger.info(`[WalletManager] ATA created: ${ataAddress.substring(0, 12)}... TX: ${signature.substring(0, 16)}...`);
-          return { success: true, ataAddress, created: true, signature };
+          logger.info(`[WalletManager] ${programType} ATA created: ${ataAddress.substring(0, 12)}... TX: ${signature.substring(0, 16)}...`);
+          return { success: true, ataAddress, created: true, signature, programId: programId.toBase58() };
         }
         throw error;
       }

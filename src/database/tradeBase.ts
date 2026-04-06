@@ -29,7 +29,8 @@ export class TradeBase {
   private dbPath: string;
 
   constructor(dbPath?: string) {
-    this.dbPath = dbPath || path.join(process.cwd(), 'data', 'insectpump.db');
+    // HARDCODED: Always use absolute path to avoid cwd issues
+    this.dbPath = dbPath || '/home/ubuntu/InsectPump/data/insectpump.db';
     this.db = new Database(this.dbPath);
     this.init();
   }
@@ -105,10 +106,11 @@ export class TradeBase {
           closed_at = NULL
       `;
       
+      // PRESERVE case - base58 addresses are case-sensitive! Never lowercase.
       const result = this.db.prepare(insertSQL).run(
-        data.token_address.toLowerCase(),
+        data.token_address,  // base58 - case sensitive
         data.token_symbol,
-        data.inang_address.toLowerCase(),
+        data.inang_address,  // base58 - case sensitive
         data.entry_price,
         data.buy_amount_sol,
         data.token_amount,
@@ -205,9 +207,9 @@ export class TradeBase {
    */
   public updateHighestPriceByToken(tokenAddress: string, price: number): { success: boolean; trailingActivated?: boolean } {
     try {
-      const tokenLower = tokenAddress.toLowerCase();
-      const trade = this.db.prepare('SELECT id, entry_price, highest_price, is_trailing_active FROM trades WHERE token_address = ? AND status = ?')
-        .get(tokenLower, 'OPEN') as { id: number; entry_price: number; highest_price: number; is_trailing_active: number } | undefined;
+      // PRESERVE case - base58 addresses are case-sensitive!
+      const trade = this.db.prepare('SELECT id, entry_price, highest_price, is_trailing_active FROM trades WHERE token_address=? AND status = ?')
+        .get(tokenAddress, 'OPEN') as { id: number; entry_price: number; highest_price: number; is_trailing_active: number } | undefined;
       
       if (!trade) {
         return { success: false };
@@ -255,17 +257,17 @@ export class TradeBase {
    */
   public closeTradeByToken(tokenAddress: string, pnlPercent: number): { success: boolean; error?: string } {
     try {
-      const tokenLower = tokenAddress.toLowerCase();
+      // PRESERVE case - base58 addresses are case-sensitive!
       
       const updateSQL = `
         UPDATE trades 
         SET status = 'CLOSED', 
             pnl_percent = ?, 
             closed_at = CURRENT_TIMESTAMP
-        WHERE token_address = ? AND status = 'OPEN'
+        WHERE token_address=? AND status = 'OPEN'
       `;
       
-      const result = this.db.prepare(updateSQL).run(pnlPercent, tokenLower);
+      const result = this.db.prepare(updateSQL).run(pnlPercent, tokenAddress);
       
       if (result.changes === 0) {
         return { success: false, error: 'Trade not found or already closed' };
@@ -288,10 +290,10 @@ export class TradeBase {
    */
   public closeTradeManual(tokenAddress: string, exitPrice: number): { success: boolean; error?: string; pnlPercent?: number } {
     try {
-      const tokenLower = tokenAddress.toLowerCase();
+      // PRESERVE case - base58 addresses are case-sensitive!
       
       // Get trade info to calculate PnL
-      const trade = this.getTradeByToken(tokenLower);
+      const trade = this.getTradeByToken(tokenAddress);
       if (!trade) {
         return { success: false, error: 'Trade not found' };
       }
@@ -307,11 +309,14 @@ export class TradeBase {
         WHERE token_address=? AND status = 'OPEN'
       `;
       
-      const result = this.db.prepare(updateSQL).run(pnlPercent, tokenLower);
+      const result = this.db.prepare(updateSQL).run(pnlPercent, tokenAddress);
       
       if (result.changes === 0) {
         return { success: false, error: 'Trade not found or already closed' };
       }
+      
+      // SYNC: Also close in positions table
+      this.closePosition(tokenAddress, pnlPercent, exitPrice, 'manual_sell');
       
       logger.info(`[TradeBase] Manual sell recorded for ${tokenAddress.substring(0, 12)}...: ${pnlPercent.toFixed(2)}% PnL`);
       
@@ -329,10 +334,10 @@ export class TradeBase {
    */
   public addManualBuy(tokenAddress: string, tokenSymbol: string, entryPrice: number, tokenAmount: number): { success: boolean; error?: string } {
     try {
-      const tokenLower = tokenAddress.toLowerCase();
+      // PRESERVE case - base58 addresses are case-sensitive!
       
       // Check if already exists
-      const existing = this.getTradeByToken(tokenLower);
+      const existing = this.getTradeByToken(tokenAddress);
       if (existing) {
         return { success: false, error: 'Token already tracked' };
       }
@@ -348,7 +353,7 @@ export class TradeBase {
       const solSpent = entryPrice * tokenAmount;
       
       this.db.prepare(insertSQL).run(
-        tokenLower,
+        tokenAddress,
         tokenSymbol,
         'MANUAL_BUY', // Special marker for manual buys
         entryPrice,
@@ -356,6 +361,16 @@ export class TradeBase {
         tokenAmount,
         entryPrice // initial highest price
       );
+      
+      // SYNC: Also insert to positions table
+      this.openPosition({
+        token_mint: tokenAddress,
+        token_symbol: tokenSymbol,
+        inang_address: 'MANUAL_BUY',
+        entry_price: entryPrice,
+        amount_sol: solSpent,
+        amount_tokens: tokenAmount,
+      });
       
       logger.info(`[TradeBase] Manual buy recorded: ${tokenSymbol} @ ${entryPrice} SOL`);
       return { success: true };
@@ -390,8 +405,8 @@ export class TradeBase {
    */
   public getTradeByToken(tokenAddress: string): Trade | null {
     try {
-      const tokenLower = tokenAddress.toLowerCase();
-      const row = this.db.prepare('SELECT * FROM trades WHERE token_address=?').get(tokenLower);
+      // PRESERVE case - base58 addresses are case-sensitive!
+      const row = this.db.prepare('SELECT * FROM trades WHERE token_address=?').get(tokenAddress);
       return row ? this.mapRowToTrade(row) : null;
     } catch (error) {
       logger.error(`[TradeBase] Error getting trade: ${error}`);
@@ -489,9 +504,10 @@ export class TradeBase {
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
       `;
       
+      // PRESERVE case - base58 addresses are case-sensitive!
       this.db.prepare(insertSQL).run(
-        tokenAddress.toLowerCase(),
-        data.whale_address.toLowerCase(),
+        tokenAddress,  // base58 - case sensitive
+        data.whale_address,  // base58 - case sensitive
         data.whale_pnl,
         data.our_pnl,
         data.exit_price,
@@ -718,8 +734,8 @@ export class TradeBase {
    */
   public getOpenTradesForInang(inangAddress: string): Trade[] {
     try {
-      const inangLower = inangAddress.toLowerCase();
-      const rows = this.db.prepare('SELECT * FROM trades WHERE inang_address = *** AND status = ?').all(inangLower, 'OPEN') as any[];
+      // PRESERVE case - base58 addresses are case-sensitive!
+      const rows = this.db.prepare('SELECT * FROM trades WHERE inang_address = *** AND status = ?').all(inangAddress, 'OPEN') as any[];
       return rows.map((row: any) => this.mapRowToTrade(row));
     } catch (error) {
       logger.error(`[TradeBase] Error getting open trades for inang: ${error}`);
@@ -737,7 +753,8 @@ export class TradeBase {
       const result: Array<Trade & { currentPnl: number; currentPrice: number }> = [];
 
       for (const trade of openTrades) {
-        const currentPrice = currentPrices.get(trade.token_address.toLowerCase()) || trade.highest_price;
+        // PRESERVE case - base58 token addresses are case-sensitive!
+        const currentPrice = currentPrices.get(trade.token_address) || trade.highest_price;
         const currentPnl = ((currentPrice - trade.entry_price) / trade.entry_price) * 100;
 
         result.push({
@@ -752,6 +769,67 @@ export class TradeBase {
     } catch (error) {
       logger.error(`[TradeBase] Error calculating PnL: ${error}`);
       return [];
+    }
+  }
+
+  /**
+   * Sync: Insert position to positions table (called on buy)
+   */
+  public openPosition(data: {
+    token_mint: string;
+    token_symbol: string;
+    inang_address: string;
+    entry_price: number;
+    amount_sol: number;
+    amount_tokens: number;
+  }): void {
+    try {
+      const sql = `
+        INSERT INTO positions (token_mint, token_symbol, entry_price, amount_tokens, amount_sol,
+                              highest_price, trailing_stop_price, partial_sold, inang_address, status, opened_at)
+        VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, 'OPEN', datetime('now'))
+        ON CONFLICT(token_mint) DO UPDATE SET
+          status = 'OPEN',
+          closed_at = NULL,
+          entry_price = excluded.entry_price,
+          amount_sol = excluded.amount_sol,
+          amount_tokens = excluded.amount_tokens,
+          inang_address = excluded.inang_address
+      `;
+      this.db.prepare(sql).run(
+        data.token_mint,
+        data.token_symbol,
+        data.entry_price,
+        data.amount_tokens,
+        data.amount_sol,
+        data.inang_address
+      );
+      logger.info(`[TradeBase] Position OPEN: ${data.token_symbol}`);
+    } catch (error) {
+      logger.error(`[TradeBase] Error opening position: ${error}`);
+    }
+  }
+
+  /**
+   * Sync: Close position in positions table (called on sell)
+   */
+  public closePosition(tokenMint: string, pnlPercent: number, exitPrice: number = 0, reason: string = ''): void {
+    try {
+      const sql = `
+        UPDATE positions SET
+          status = 'CLOSED',
+          closed_at = datetime('now'),
+          pnl_percent = ?,
+          closed_price = ?,
+          exit_reason = ?
+        WHERE token_mint = ? AND status = 'OPEN'
+      `;
+      const result = this.db.prepare(sql).run(pnlPercent, exitPrice, reason, tokenMint);
+      if (result.changes > 0) {
+        logger.info(`[TradeBase] Position CLOSED: ${tokenMint.substring(0, 12)}... (PnL: ${pnlPercent.toFixed(2)}%)`);
+      }
+    } catch (error) {
+      logger.error(`[TradeBase] Error closing position: ${error}`);
     }
   }
 

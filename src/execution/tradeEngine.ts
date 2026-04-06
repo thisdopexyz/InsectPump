@@ -17,14 +17,24 @@ import {
 import {
   getAssociatedTokenAddress,
   TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
 } from '@solana/spl-token';
 import * as anchor from '@coral-xyz/anchor';
 import bs58 from 'bs58';
 import { CONFIG } from '../config/config';
+import { CONSTANTS } from '../config/constants';
 import { logger } from '../utils/logger';
 import { TradeBase } from '../database/tradeBase';
 import { priceService } from '../services/priceService';
 import { initDynamicFeeService, DynamicFeeService } from './dynamicFee';
+
+// ---------------------------------------------------------------------------
+// Pump.fun IDL (Sell only)
+// ---------------------------------------------------------------------------
+const PUMP_FUN_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+const PUMP_FUN_FEE_RECIPIENT = new PublicKey('CebN5WGQ4dMPhcM6GqwfN7j7Fc8f6Mm4NzT7EqnR3E7E');
+const GLOBAL_ACCOUNT = new PublicKey('4wzbMAxcJ6E7ggj8jPqDudqxGkjZcQtNh9VWuG6iY9rz');
+const EVENT_AUTHORITY = new PublicKey('Ce6Rq6wV8ACqP7j7T9e6X7g4dMPhcM6GqwfN7j7Fc8f6');
 
 // ---------------------------------------------------------------------------
 // Trade Result Interface
@@ -100,15 +110,32 @@ export class TradeEngine {
   async getTokenBalance(mint: string): Promise<number> {
     try {
       const mintPubkey = new PublicKey(mint);
-      const ata = await getAssociatedTokenAddress(mintPubkey, this.keypair.publicKey);
       
-      const accountInfo = await this.connection.getTokenAccountBalance(ata);
-      const balance = accountInfo.value.uiAmount || 0;
-      
-      if (balance > 0) {
-        logger.info(`[TradeEngine] Token balance ${mint.substring(0, 8)}...: ${balance}`);
+      // Try SPL Token program first
+      let ata = await getAssociatedTokenAddress(mintPubkey, this.keypair.publicKey, false, TOKEN_PROGRAM_ID);
+      try {
+        const accountInfo = await this.connection.getTokenAccountBalance(ata);
+        const balance = accountInfo.value.uiAmount || 0;
+        if (balance > 0) {
+          logger.info(`[TradeEngine] Token balance (SPL) ${mint.substring(0, 8)}...: ${balance}`);
+        }
+        return balance;
+      } catch {
+        // SPL failed, try Token-2022
       }
-      return balance;
+      
+      // Try Token-2022 program
+      ata = await getAssociatedTokenAddress(mintPubkey, this.keypair.publicKey, false, TOKEN_2022_PROGRAM_ID);
+      try {
+        const accountInfo = await this.connection.getTokenAccountBalance(ata);
+        const balance = accountInfo.value.uiAmount || 0;
+        if (balance > 0) {
+          logger.info(`[TradeEngine] Token balance (T2022) ${mint.substring(0, 8)}...: ${balance}`);
+        }
+        return balance;
+      } catch {
+        return 0;
+      }
     } catch (error) {
       logger.error(`[TradeEngine] get_token_balance error: ${error}`);
       return 0;
@@ -118,12 +145,28 @@ export class TradeEngine {
   async getTokenBalanceRaw(mint: string): Promise<anchor.BN> {
     try {
       const mintPubkey = new PublicKey(mint);
-      const ata = await getAssociatedTokenAddress(mintPubkey, this.keypair.publicKey);
       
-      const accountInfo = await this.connection.getTokenAccountBalance(ata);
-      const amount = accountInfo.value.amount || '0';
+      // Try SPL Token program first
+      let ata = await getAssociatedTokenAddress(mintPubkey, this.keypair.publicKey, false, TOKEN_PROGRAM_ID);
+      try {
+        const accountInfo = await this.connection.getTokenAccountBalance(ata);
+        const amount = accountInfo.value.amount || '0';
+        if (new anchor.BN(amount).gt(new anchor.BN(0))) {
+          return new anchor.BN(amount);
+        }
+      } catch {
+        // SPL failed, try Token-2022
+      }
       
-      return new anchor.BN(amount);
+      // Try Token-2022 program
+      ata = await getAssociatedTokenAddress(mintPubkey, this.keypair.publicKey, false, TOKEN_2022_PROGRAM_ID);
+      try {
+        const accountInfo = await this.connection.getTokenAccountBalance(ata);
+        const amount = accountInfo.value.amount || '0';
+        return new anchor.BN(amount);
+      } catch {
+        return new anchor.BN(0);
+      }
     } catch (error) {
       return new anchor.BN(0);
     }
@@ -132,17 +175,19 @@ export class TradeEngine {
   /**
    * Get all token accounts in wallet with non-zero balance
    * Returns map of mint -> balance
+   * Checks BOTH SPL Token and Token-2022 programs
    */
   async getAllTokenBalances(): Promise<Map<string, number>> {
     try {
-      const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(
+      const balances = new Map<string, number>();
+      
+      // SPL Token Program
+      const splTokenAccounts = await this.connection.getParsedTokenAccountsByOwner(
         this.keypair.publicKey,
         { programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') }
       );
-
-      const balances = new Map<string, number>();
       
-      for (const account of tokenAccounts.value) {
+      for (const account of splTokenAccounts.value) {
         const parsed = account.account.data.parsed;
         const mint = parsed.info.mint;
         const balance = parsed.info.tokenAmount.uiAmount || 0;
@@ -152,7 +197,24 @@ export class TradeEngine {
         }
       }
       
-      logger.info(`[TradeEngine] Found ${balances.size} tokens in wallet`);
+      // Token-2022 Program
+      const token2022Accounts = await this.connection.getParsedTokenAccountsByOwner(
+        this.keypair.publicKey,
+        { programId: new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb') }
+      );
+      
+      for (const account of token2022Accounts.value) {
+        const parsed = account.account.data.parsed;
+        const mint = parsed.info.mint;
+        const balance = parsed.info.tokenAmount.uiAmount || 0;
+        
+        if (balance > 0) {
+          balances.set(mint, balance);
+          logger.info(`[TradeEngine] Token-2022 found: ${mint.substring(0, 12)}... balance = ${balance}`);
+        }
+      }
+      
+      logger.info(`[TradeEngine] Found ${balances.size} tokens in wallet (${splTokenAccounts.value.length} SPL + ${token2022Accounts.value.length} Token-2022)`);
       return balances;
     } catch (error) {
       logger.error(`[TradeEngine] getAllTokenBalances error: ${error}`);
@@ -162,8 +224,8 @@ export class TradeEngine {
 
   // ==================== PUBLIC API (for main.ts) ====================
 
-  async buy(mint: string, amountSol: number): Promise<TradeResult> {
-    return this.buyToken(mint, amountSol);
+  async buy(mint: string, amountSol: number, tokenSymbol: string = 'UNKNOWN', inangAddress: string = ''): Promise<TradeResult> {
+    return this.buyToken(mint, amountSol, tokenSymbol, inangAddress);
   }
 
   async sell(mint: string, percentage: number): Promise<TradeResult> {
@@ -231,18 +293,33 @@ export class TradeEngine {
       return { success: false, error: 'sell_amount_zero', route: 'none' };
     }
 
+    // Check if Token-2022
+    const mintPubkey = new PublicKey(mint);
+    const mintAccount = await this.connection.getAccountInfo(mintPubkey);
+    const isToken2022 = mintAccount?.owner.equals(TOKEN_2022_PROGRAM_ID) ?? false;
+    
+    if (isToken2022) {
+      logger.info(`[Sell] Token-2022 detected, using manual bonding curve sell...`);
+      const token2022Result = await this.executeToken2022Sell(mint, percentage);
+      if (token2022Result.success && token2022Result.txHash) {
+        await this.recordSellPosition(mint, token2022Result.txHash, 'token2022_sell');
+        return { ...token2022Result, route: 'pump_portal' };
+      }
+      logger.warn(`[Sell] Token-2022 sell failed, trying fallback paths...`);
+    }
+
     // Try 1: Pump.fun bonding curve via PumpPortal
     const pumpResult = await this.executePumpPortalSell(mint, percentage, 'pump');
     if (pumpResult.success && pumpResult.txHash) {
-      await this.recordSellPosition(mint, pumpResult.txHash);
+      await this.recordSellPosition(mint, pumpResult.txHash, 'pump_sell');
       return { ...pumpResult, route: 'pump_portal' };
     }
 
     // Try 2: Pump AMM
     logger.info(`[Sell] BC failed -> trying Pump AMM...`);
-    const ammResult = await this.executePumpPortalSell(mint, percentage, 'pump_amm');  // FIX: was 'pump', now 'pump_amm'
+    const ammResult = await this.executePumpPortalSell(mint, percentage, 'pump_amm');
     if (ammResult.success && ammResult.txHash) {
-      await this.recordSellPosition(mint, ammResult.txHash);
+      await this.recordSellPosition(mint, ammResult.txHash, 'pump_amm_sell');
       return { ...ammResult, route: 'pump_amm' };
     }
 
@@ -250,7 +327,7 @@ export class TradeEngine {
     logger.info(`[Sell] Pump paths failed, trying Raydium via PumpPortal...`);
     const raydiumResult = await this.executePumpPortalSell(mint, percentage, 'raydium');
     if (raydiumResult.success && raydiumResult.txHash) {
-      await this.recordSellPosition(mint, raydiumResult.txHash);
+      await this.recordSellPosition(mint, raydiumResult.txHash, 'raydium_sell');
       return { ...raydiumResult, route: 'raydium' };
     }
 
@@ -467,6 +544,137 @@ export class TradeEngine {
     }
   }
 
+  /**
+   * Execute sell for Token-2022 via bonding curve (manual Anchor transaction)
+   * PumpPortal API doesn't support Token-2022, so we build tx manually
+   */
+  private async executeToken2022Sell(mint: string, percentage: number): Promise<TradeResult> {
+    try {
+      const percent = Math.max(1, Math.min(100, Math.floor(percentage)));
+      logger.info(`[Token2022 Sell] Selling ${percent}% of ${mint.slice(0, 12)}... via bonding curve`);
+
+      // Get token balance
+      const mintPubkey = new PublicKey(mint);
+      const userPubkey = this.keypair.publicKey;
+      
+      // Get Token-2022 ATA
+      const userAta = await getAssociatedTokenAddress(
+        mintPubkey, 
+        userPubkey, 
+        false, 
+        TOKEN_2022_PROGRAM_ID
+      );
+      
+      // Get balance
+      const accountInfo = await this.connection.getTokenAccountBalance(userAta);
+      const balance = new anchor.BN(accountInfo.value.amount);
+      
+      if (balance.lte(new anchor.BN(0))) {
+        return { success: false, error: 'no_token_balance' };
+      }
+      
+      // Calculate sell amount
+      const sellAmount = balance.muln(percent).divn(100);
+      if (sellAmount.lte(new anchor.BN(0))) {
+        return { success: false, error: 'sell_amount_zero' };
+      }
+
+      // Get bonding curve PDA
+      const [bondingCurve] = PublicKey.findProgramAddressSync(
+        [Buffer.from('bonding-curve'), mintPubkey.toBuffer()],
+        PUMP_FUN_PROGRAM_ID
+      );
+
+      // Get associated bonding curve ATA
+      const associatedBondingCurve = await getAssociatedTokenAddress(
+        mintPubkey,
+        bondingCurve,
+        true,
+        TOKEN_2022_PROGRAM_ID
+      );
+
+      // Build instruction data: sighash + amount
+      // Sell sighash: anchor hash of "global:sell"
+      const sellDiscriminator = Buffer.from([51, 230, 133, 164, 1, 127, 131, 173]);
+      const amountBuffer = Buffer.alloc(8);
+      amountBuffer.writeBigUInt64LE(BigInt(sellAmount.toString()));
+      const data = Buffer.concat([sellDiscriminator, amountBuffer]);
+
+      // Create instruction
+      const keys = [
+        { pubkey: GLOBAL_ACCOUNT, isSigner: false, isWritable: false },
+        { pubkey: PUMP_FUN_FEE_RECIPIENT, isSigner: false, isWritable: true },
+        { pubkey: mintPubkey, isSigner: false, isWritable: false },
+        { pubkey: bondingCurve, isSigner: false, isWritable: true },
+        { pubkey: associatedBondingCurve, isSigner: false, isWritable: true },
+        { pubkey: userAta, isSigner: false, isWritable: true },
+        { pubkey: userPubkey, isSigner: true, isWritable: true },
+        { pubkey: anchor.web3.SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: TOKEN_2022_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: anchor.web3.SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+        { pubkey: EVENT_AUTHORITY, isSigner: false, isWritable: false },
+        { pubkey: PUMP_FUN_PROGRAM_ID, isSigner: false, isWritable: false },
+      ];
+
+      const instruction = new anchor.web3.TransactionInstruction({
+        keys,
+        programId: PUMP_FUN_PROGRAM_ID,
+        data,
+      });
+
+      // Get priority fee
+      const priorityFee = await this.feeService.getRecommendedFee('urgent');
+
+      // Build transaction
+      const { blockhash, lastValidBlockHeight } = await this.connection.getLatestBlockhash('confirmed');
+      
+      const messageV0 = new anchor.web3.TransactionMessage({
+        payerKey: userPubkey,
+        recentBlockhash: blockhash,
+        instructions: [
+          // Priority fee instruction
+          anchor.web3.ComputeBudgetProgram.setComputeUnitPrice({
+            microLamports: priorityFee,
+          }),
+          instruction,
+        ],
+      }).compileToV0Message();
+
+      const transaction = new VersionedTransaction(messageV0);
+      transaction.sign([this.keypair]);
+
+      // Send transaction
+      const signature = await this.connection.sendTransaction(transaction, {
+        maxRetries: CONFIG.TX_SEND_MAX_RETRIES,
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+      });
+
+      // Wait for confirmation
+      const confirmation = await this.connection.confirmTransaction(
+        { signature, blockhash, lastValidBlockHeight },
+        'confirmed'
+      );
+
+      if (confirmation.value.err) {
+        throw new Error(`Transaction failed: ${confirmation.value.err}`);
+      }
+
+      logger.info(`[Token2022 Sell] SUCCESS! Tx: ${signature}`);
+      return { success: true, txHash: signature, route: 'pump_portal', slippageUsed: 25 / 100 };
+
+    } catch (error: any) {
+      const errorMsg = error.message || String(error);
+      
+      if (errorMsg.includes('slippage') || errorMsg.includes('0x11')) {
+        return { success: false, error: 'slippage_exceeded', slippageUsed: 25 / 100 };
+      }
+      
+      logger.error(`[Token2022 Sell] Failed: ${errorMsg}`);
+      return { success: false, error: errorMsg };
+    }
+  }
+
   // ==================== DATABASE HELPERS ====================
 
   private async recordBuyPosition(
@@ -479,6 +687,7 @@ export class TradeEngine {
     try {
       const entryPrice = await priceService.getTokenPrice(tokenAddress);
       
+      // Record in trades table
       this.tradeBase.openTrade({
         token_address: tokenAddress,
         token_symbol: tokenSymbol,
@@ -488,19 +697,35 @@ export class TradeEngine {
         token_amount: 0,
       });
 
+      // SYNC: Also record in positions table
+      this.tradeBase.openPosition({
+        token_mint: tokenAddress,
+        token_symbol: tokenSymbol,
+        inang_address: inangAddress || this.keypair.publicKey.toBase58(),
+        entry_price: entryPrice,
+        amount_sol: amountSol,
+        amount_tokens: 0,
+      });
+
       logger.info(`[TradeEngine] Recorded buy position for ${tokenAddress.substring(0, 12)}... tx: ${txHash.substring(0, 16)}...`);
     } catch (error) {
       logger.error(`[TradeEngine] Failed to record buy position: ${error}`);
     }
   }
 
-  private async recordSellPosition(tokenAddress: string, txHash: string): Promise<void> {
+  private async recordSellPosition(tokenAddress: string, txHash: string, reason: string = ''): Promise<void> {
     try {
       const trade = this.tradeBase.getTradeByToken(tokenAddress);
       if (trade) {
         const currentPrice = await priceService.getTokenPrice(tokenAddress);
         const pnlPercent = ((currentPrice - trade.entry_price) / trade.entry_price) * 100;
+        
+        // Close in trades table
         this.tradeBase.closeTradeByToken(tokenAddress, pnlPercent);
+        
+        // SYNC: Also close in positions table
+        this.tradeBase.closePosition(tokenAddress, pnlPercent, currentPrice, reason);
+        
         logger.info(`[TradeEngine] Recorded sell position for ${tokenAddress.substring(0, 12)}... (PnL: ${pnlPercent.toFixed(2)}%) tx: ${txHash.substring(0, 16)}...`);
       }
     } catch (error) {

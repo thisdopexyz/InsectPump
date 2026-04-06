@@ -17,6 +17,41 @@ import { createModuleLogger } from './utils/logger';
 const logger = createModuleLogger('Main');
 
 /**
+ * Map buy error codes to human-readable messages
+ */
+function getBuyErrorMessage(error: string | undefined, tokenMint?: string): string {
+  if (!error) return 'Unknown error';
+  
+  // Check if non-Pump.fun token (mint doesn't end with 'pump')
+  if (tokenMint && !tokenMint.toLowerCase().endsWith('pump')) {
+    return `❌ UNSUPPORTED DEX: Token not on Pump.fun (possible BonkFun/Moonshot/other)`;
+  }
+  
+  const errorMap: Record<string, string> = {
+    'all_paths_failed': '❌ NO LIQUIDITY: Token not tradeable on Pump.fun/Raydium (possible honeypot/rug)',
+    'api_error_400': '❌ INVALID TOKEN: API rejected (not Pump.fun token or honeypot)',
+    'api_error_404': '❌ NOT FOUND: Token not on Pump.fun',
+    'api_error_429': '❌ RATE LIMITED: Too many requests, try again later',
+    'api_error_500': '❌ SERVER ERROR: PumpPortal temporarily down',
+    'low_balance': '❌ LOW BALANCE: Wallet SOL insufficient',
+    'no_token_balance': '❌ NO TOKENS: Wallet has no tokens to sell',
+    'insufficient_priority_fee': '❌ FEE TOO LOW: Transaction rejected, fee issue',
+    'slippage_exceeded': '❌ SLIPPAGE: Price moved too much, buy aborted',
+    'transaction_failed': '❌ TX FAILED: Blockchain rejected transaction',
+    'timeout': '❌ TIMEOUT: Transaction took too long',
+    'simulation_failed': '❌ SIMULATION FAILED: Transaction would fail (honeypot?)',
+  };
+  
+  // Check for API error pattern
+  if (error.startsWith('api_error_')) {
+    const code = error.replace('api_error_', '');
+    return errorMap[error] || `❌ API ERROR ${code}: PumpPortal rejected request`;
+  }
+  
+  return errorMap[error] || `❌ ${error.toUpperCase()}`;
+}
+
+/**
 * Main Application Class - Wiring all components together
 * MODE: EyeInsider - Hunt insiders in $15K-$50K range
 */
@@ -53,10 +88,7 @@ this.tradeEngine = new TradeEngine();
 this.walletManager = new WalletManager(this.tradeBase);
 this.telegram = new TelegramService();
 
-this.inangMonitor = new InangMonitor(
-this.inangBase,
-CONFIG.PUMP_PORTAL_WSS || 'wss://pumpportal.fun/api/data'
-);
+this.inangMonitor = new InangMonitor(this.inangBase);
 
 this.priceMonitor = new PriceMonitor(
 CONFIG.PUMP_PORTAL_WSS || 'wss://pumpportal.fun/api/data',
@@ -156,19 +188,20 @@ process.exit(1);
 * NOTE: Eye mode - new token hunting
 */
 private setupWiring(): void {
-// WIRING 1: Eye on 'inang' -> InangMonitor.addInangToMonitor()
-this.eye.on('inang', async (event: any) => {
+// WIRING 1: Eye on 'inang_added' -> InangMonitor.addInangToMonitor()
+this.eye.on('inang_added', async (event: any) => {
 const inang = event;
+const inangData = inang.data || {};
 logger.info(`[Event] 🎯 INSIDER DISCOVERED: ${inang.trader?.substring(0, 12)}...`);
-logger.info(`        Token: ${inang.symbol} ($${(inang.mcap/1000).toFixed(1)}K)`);
-logger.info(`        Winrate: ${inang.winrate?.toFixed(2)}%, PnL: ${inang.pnl?.toFixed(4)} SOL`);
+logger.info(`        Token: ${inang.symbol || 'Unknown'} ($${((inang.mcap || 0)/1000).toFixed(1)}K)`);
+logger.info(`        Winrate: ${inangData.winrate?.toFixed(2) || 0}%, PnL: ${inangData.total_pnl?.toFixed(4) || 0} SOL, TX: ${inangData.total_tx || 0}`);
 
 // Send Telegram notification
 await this.telegram.notifyInangFound(
 inang.trader,
-inang.winrate || 0,
-inang.pnl || 0,
-0 // totalTx not available in EyeInsider event
+inangData.winrate || 0,
+inangData.total_pnl || 0,
+inangData.total_tx || 0
 );
 
 // Add to monitor (untuk copy-trade)
@@ -182,12 +215,26 @@ logger.info(`        Token: ${event.tokenSymbol} (${event.tokenAddress.substring
 logger.info(`        Amount: ${event.solAmount.toFixed(4)} SOL`);
 
 try {
-// === SYARAT 1: Min Market Cap 60 SOL ===
-        const tokenMcap=event.mcap || event.tokenMarketCapSol || event.solAmount || 0;
-if (tokenMcap < CONFIG.OUR_MIN_MCAP_SOL) {
-logger.warn(`[Trade] BUY BLOCKED: Market cap too low (${tokenMcap.toFixed(2)} SOL < ${CONFIG.OUR_MIN_MCAP_SOL} SOL)`);
-return; // Skip this buy
-}
+      // === SYARAT 1: Market Cap Range Check (from Eye real-time data) ===
+      // Get mcap from Eye which tracks all tokens from PumpPortal WSS
+      const tokenMcap = this.eye.getTokenMcap(event.tokenAddress);
+      
+      // If Eye doesn't have mcap yet, SKIP this buy (Helius token not in PumpPortal yet)
+      if (tokenMcap === 0) {
+        logger.warn(`[Trade] BUY BLOCKED: Token ${event.tokenAddress.substring(0, 8)}... mcap not in Eye yet (Helius token not tracked by PumpPortal)`);
+        return; // Skip - we'll catch it next time when PumpPortal tracks it
+      }
+      
+      logger.info(`[Trade] Token ${event.tokenAddress.substring(0, 8)}... mcap: ${tokenMcap.toFixed(2)} SOL`);
+
+      if (tokenMcap < CONFIG.OUR_MIN_MCAP_SOL) {
+        logger.warn(`[Trade] BUY BLOCKED: Market cap too low (${tokenMcap.toFixed(2)} SOL < ${CONFIG.OUR_MIN_MCAP_SOL} SOL)`);
+        return; // Skip this buy
+      }
+      if (tokenMcap > CONFIG.OUR_MAX_MCAP_SOL) {
+        logger.warn(`[Trade] BUY BLOCKED: Market cap too high (${tokenMcap.toFixed(2)} SOL > ${CONFIG.OUR_MAX_MCAP_SOL} SOL)`);
+        return; // Skip this buy (established/mature token)
+      }
 
 // === SYARAT 2: Min Inang Buy Amount 0.3 SOL ===
 if (event.solAmount < CONFIG.MIN_INANG_BUY_SOL) {
@@ -249,7 +296,9 @@ let buyResult;
 try {
 buyResult = await this.tradeEngine.buy(
 event.tokenAddress,
-event.solAmount // Or use CONFIG.copyTradeAmount
+CONFIG.OUR_BUY_SIZE_SOL,  // Use our buy size (0.01 SOL)
+event.tokenSymbol || 'UNKNOWN',
+event.inangAddress  // CRITICAL: Pass inang address for copy-sell matching!
 );
 
 if (buyResult.success && buyResult.txHash) {
@@ -270,20 +319,21 @@ const entryPrice = event.price || (event.solAmount / event.amount);
 await this.priceMonitor.startTracking(event.tokenAddress, entryPrice);
 
 } else {
-logger.error(`[Trade] COPY-BUY FAILED: ${buyResult.error}`);
+const errorMessage = getBuyErrorMessage(buyResult.error, event.tokenAddress);
+logger.error(`[Trade] COPY-BUY ${errorMessage}`);
 
 // EXTENDED BLOCK: Add to extended block list to prevent retry (anti-honeypot)
 const blockUntil = Date.now() + this.BUY_FAIL_BLOCK_MS;
 this.extendedBuyBlock.set(tokenLower, {
 until: blockUntil,
-reason: `Buy failed: ${buyResult.error?.substring(0, 50) || 'Unknown error'}`
+reason: errorMessage
 });
 logger.warn(`[Trade] Extended block added: ${event.tokenSymbol} blocked for ${this.BUY_FAIL_BLOCK_MS / 60000} minutes`);
 
 // Send Telegram alert for failed buy
 await this.telegram.notifyBuyFailed(
 event.tokenAddress,
-buyResult.error || 'Unknown error'
+errorMessage
 );
 }
 
@@ -324,7 +374,8 @@ return;
 
 // CRITICAL: Validate this sell is from the SAME inang we followed for buy
 // Prevents: Inang B sell triggering copy-sell on position opened with Inang A
-if (trade.inang_address.toLowerCase() !== event.inangAddress.toLowerCase()) {
+// NOTE: Case-sensitive comparison - base58 addresses must preserve case
+if (trade.inang_address !== event.inangAddress) {
   logger.info(`[Trade] COPY-SELL: IGNORED - Seller ${event.inangAddress.substring(0, 12)}... != Entry inang ${trade.inang_address.substring(0, 12)}...`);
   return;
 }
@@ -727,8 +778,8 @@ let boughtManual = 0;
 // Check each DB trade against wallet
 for (const trade of openTrades) {
 try {
-const tokenLower = trade.token_address.toLowerCase();
-const balance = walletTokens.get(tokenLower);
+// PRESERVE case - base58 addresses are case-sensitive!
+const balance = walletTokens.get(trade.token_address);
 
 if (balance && balance > 0) {
 // Token still in wallet - resume tracking
@@ -760,7 +811,8 @@ logger.error(`[Main] Failed to validate trade ${trade.token_symbol}: ${err}`);
 
 // Check for manual buys (tokens in wallet but not in DB)
 walletTokens.forEach((balance, mint) => {
-const existingTrade = openTrades.find(t => t.token_address.toLowerCase() === mint.toLowerCase());
+// PRESERVE case - base58 addresses are case-sensitive!
+const existingTrade = openTrades.find(t => t.token_address === mint);
 if (!existingTrade) {
 // New token not tracked - could be manual buy
 // Add to DB with 'MANUAL_BUY' marker
@@ -804,8 +856,8 @@ let boughtManual = 0;
 
 // Check for manual sells
 for (const trade of openTrades) {
-const tokenLower = trade.token_address.toLowerCase();
-const balance = walletTokens.get(tokenLower);
+// PRESERVE case - base58 addresses are case-sensitive!
+const balance = walletTokens.get(trade.token_address);
 
 if (!balance || balance === 0) {
 // Token sold manually
@@ -823,7 +875,8 @@ soldManual++;
 
 // Check for manual buys
 walletTokens.forEach((balance, mint) => {
-const existingTrade = openTrades.find(t => t.token_address.toLowerCase() === mint.toLowerCase());
+// PRESERVE case - base58 addresses are case-sensitive!
+const existingTrade = openTrades.find(t => t.token_address === mint);
 if (!existingTrade) {
 // Check if recently added (avoid duplicate notifications)
 const recentlyAdded = this.tradeBase.getTradeByToken(mint);

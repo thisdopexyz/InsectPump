@@ -58,9 +58,9 @@ export class PriceMonitor extends EventEmitter {
    * Start tracking a new token
    */
   public async startTracking(tokenAddress: string, entryPrice: number): Promise<void> {
-    const tokenLower = tokenAddress.toLowerCase();
+    // PRESERVE case - base58 addresses are case-sensitive!
     
-    if (this.trackedTokens.has(tokenLower)) {
+    if (this.trackedTokens.has(tokenAddress)) {
       logger.warn(`[PriceMonitor] Token ${tokenAddress} is already being tracked`);
       return;
     }
@@ -68,29 +68,29 @@ export class PriceMonitor extends EventEmitter {
     const stopLossPrice = entryPrice * (1 - this.emergencyStopLoss);
     
     const tracking: TokenTracking = {
-      tokenAddress: tokenLower,
+      tokenAddress: tokenAddress,
       entryPrice,
       highestPrice: entryPrice,
       isTrailingActive: false,
       stopLossPrice
     };
 
-    this.trackedTokens.set(tokenLower, tracking);
+    this.trackedTokens.set(tokenAddress, tracking);
     logger.info(`[PriceMonitor] Started tracking ${tokenAddress} at entry price ${entryPrice.toFixed(9)} SOL`);
 
     // Subscribe to token-specific trades
-    this.subscribeToToken(tokenLower);
+    this.subscribeToToken(tokenAddress);
   }
 
   /**
    * Stop tracking a token
    */
   public stopTracking(tokenAddress: string): void {
-    const tokenLower = tokenAddress.toLowerCase();
+    // PRESERVE case - base58 addresses are case-sensitive!
     
-    if (this.trackedTokens.has(tokenLower)) {
-      this.trackedTokens.delete(tokenLower);
-      this.unsubscribeFromToken(tokenLower);
+    if (this.trackedTokens.has(tokenAddress)) {
+      this.trackedTokens.delete(tokenAddress);
+      this.unsubscribeFromToken(tokenAddress);
       logger.info(`[PriceMonitor] Stopped tracking ${tokenAddress}`);
     }
   }
@@ -187,7 +187,8 @@ export class PriceMonitor extends EventEmitter {
     // Check if this is a token trade message
     if (!message.mint || !message.vSolReserves || !message.vTokenReserves) return;
 
-    const tokenAddress = message.mint.toLowerCase();
+    // PRESERVE case - base58 addresses are case-sensitive!
+    const tokenAddress = message.mint;
     const tracking = this.trackedTokens.get(tokenAddress);
 
     if (!tracking) return; // Not tracking this token
@@ -300,7 +301,8 @@ export class PriceMonitor extends EventEmitter {
    * Get tracking info for a token
    */
   public getTrackingInfo(tokenAddress: string): TokenTracking | undefined {
-    return this.trackedTokens.get(tokenAddress.toLowerCase());
+    // PRESERVE case - base58 addresses are case-sensitive!
+    return this.trackedTokens.get(tokenAddress);
   }
 
   /**
@@ -314,7 +316,8 @@ export class PriceMonitor extends EventEmitter {
    * Check if token is being tracked
    */
   public isTracking(tokenAddress: string): boolean {
-    return this.trackedTokens.has(tokenAddress.toLowerCase());
+    // PRESERVE case - base58 addresses are case-sensitive!
+    return this.trackedTokens.has(tokenAddress);
   }
 
   /**
@@ -322,7 +325,8 @@ export class PriceMonitor extends EventEmitter {
    * Note: Price is calculated on-the-fly from WSS messages
    */
   public getCurrentPrice(tokenAddress: string): number | undefined {
-    const tracking = this.trackedTokens.get(tokenAddress.toLowerCase());
+    // PRESERVE case - base58 addresses are case-sensitive!
+    const tracking = this.trackedTokens.get(tokenAddress);
     return tracking ? tracking.highestPrice : undefined;
   }
 }

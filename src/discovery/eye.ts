@@ -35,6 +35,19 @@ export class Eye extends EventEmitter {
   private reconnectAttempts = 0;
   private processingWallets: Set<string> = new Set();
   private totalCreditsUsed: number = 0;
+  
+  // Deduplication cache for create events (prevent duplicate subscriptions)
+  private recentMints: Map<string, number> = new Map();
+  private readonly DEDUP_WINDOW_MS = 5000; // 5 second window
+  
+  // Token creators tracking (skip creator buys - like ParasiteCombine)
+  private tokenCreators: Map<string, string> = new Map();
+  
+  // Track last buy time per token (for dead token replacement)
+  private tokenLastBuyTime: Map<string, number> = new Map();
+  
+  // Token considered "dead" if no buy after 3 minutes from launch
+  private readonly TOKEN_DEAD_AFTER_MS = 3 * 60 * 1000; // 3 minutes
 
   constructor() {
     super();
@@ -70,10 +83,13 @@ export class Eye extends EventEmitter {
    * Start Eye radar - connect to PumpPortal WSS
    */
   async start(): Promise<void> {
-    if (this.isRunning) {
+    if (this.isRunning || this.ws?.readyState === WebSocket.OPEN) {
       logger.warn('[Eye] Radar already running');
       return;
     }
+    
+    // Set flag immediately to prevent race condition
+    this.isRunning = true;
 
     await this.connect();
   }
@@ -153,7 +169,11 @@ export class Eye extends EventEmitter {
     // Subscribe ke newToken events (dapat semua token baru)
     const newTokenMsg = { method: 'subscribeNewToken' };
     this.ws.send(JSON.stringify(newTokenMsg));
-    logger.info('[Eye] ✅ Subscribed to newToken (with deployer skip: first 5 buys ignored)');
+    
+    // NOTE: Global subscription keys: ['*'] is BROKEN - only sends create events, not buy/sell
+    // We subscribe per-token in handleMessage() when txType === 'create'
+    
+    logger.info('[Eye] ✅ Subscribed to newToken (per-token trade subs on create)');
   }
 
   // Message counter for debug
@@ -178,7 +198,6 @@ export class Eye extends EventEmitter {
   private readonly PUMP_THRESHOLD_PERCENT = CONFIG.EYE_PUMP_THRESHOLD_PERCENT;
   private readonly MIN_MCAP_FOR_TRACK = CONFIG.EYE_MIN_MCAP_TRACK_SOL;
   private readonly SKIP_FIRST_N_BUYS = CONFIG.EYE_SKIP_FIRST_N_BUYS;
-  private readonly SKIP_FIRST_30_SECONDS = CONFIG.SNIPER_WINDOW_SECONDS * 1000;
   private readonly BUNDLE_WINDOW_MS = CONFIG.EYE_BUNDLE_WINDOW_MS;
   private readonly BUNDLE_AMOUNT_THRESHOLD = CONFIG.EYE_BUNDLE_AMOUNT_THRESHOLD_SOL;
   private readonly WALLET_CACHE_TTL_MS = CONFIG.EYE_WALLET_CACHE_TTL_MINUTES * 60 * 1000;
@@ -206,6 +225,11 @@ export class Eye extends EventEmitter {
         (parsed.marketCapSol as string) || (parsed.vSolInBondingCurve as string) || '0'
       );
 
+      // === DEBUG: Log ALL message types (first 100 msgs) ===
+      if (this.msgCount <= 100) {
+        logger.info(`[Eye] 📥 MSG #${this.msgCount}: txType=${txType}, mint=${mint.slice(0,8)||'none'}, sol=${parsed.solAmount||parsed.initialBuy||'none'}`);
+      }
+
       // === STEP 1: Track mcap untuk semua trades (buat pumping detection) ===
       if (mint && mcap > 0) {
         this.trackTokenMcap(mint, mcap);
@@ -219,55 +243,109 @@ export class Eye extends EventEmitter {
       if (txType === 'create' && mint) {
         const now = Date.now();
         
-        // === LIMIT CHECK: Max concurrent token subscriptions ===
-        if (this.trackedTokens.size >= this.MAX_TRACKED_TOKENS) {
-          // Find token to remove: oldest AND passed minimum stay duration
-          // This ensures tokens stay long enough for whale detection (30s sniper window + buffer)
-          let candidateMint: string | null = null;
-          let oldestTime = now;
-          this.trackedTokens.forEach((ts, m) => {
-            const launchTime = this.tokenLaunchTime.get(m) || ts;
-            const ageMs = now - launchTime;
-            // Only consider tokens past minimum stay duration (from .env)
-            if (ageMs >= CONFIG.EYE_MIN_TOKEN_STAY_MS && ts < oldestTime) {
-              oldestTime = ts;
-              candidateMint = m;
-            }
+        // === STEP 0: Deduplication - skip if seen recently ===
+        const lastSeen = this.recentMints.get(mint);
+        if (lastSeen && (now - lastSeen) < this.DEDUP_WINDOW_MS) {
+          logger.info(`[Eye] ⚠️ DEDUP: ${mint.slice(0, 8)}... seen ${now - lastSeen}ms ago, skipping`);
+          return;
+        }
+        this.recentMints.set(mint, now);
+        
+        // Cleanup old entries periodically
+        if (this.recentMints.size > 1000) {
+          const cutoff = now - this.DEDUP_WINDOW_MS;
+          this.recentMints.forEach((ts, m) => {
+            if (ts < cutoff) this.recentMints.delete(m);
           });
-          // If no token passed min stay, skip adding new token to protect tracking window
-          if (!candidateMint) {
-            logger.warn(`[Eye] ⚠️ All tokens still young (<${CONFIG.EYE_MIN_TOKEN_STAY_MS/60000}min), skipping new token`);
-            return; // Don't add new token, keep existing ones to mature
-          }
-          if (candidateMint && typeof candidateMint === 'string') {
-            this.unsubscribeTokenTrade(candidateMint);
-            this.trackedTokens.delete(candidateMint);
-            this.tokenBuyCounter.delete(candidateMint);
-            this.tokenLaunchTime.delete(candidateMint);
-            logger.info(`[Eye] ♻️ Replaced token: ${(candidateMint as string).slice(0, 12)}... (limit: ${this.MAX_TRACKED_TOKENS})`);
-          }
         }
         
+        // === STEP 1: Skip if already tracking this token ===
+        if (this.trackedTokens.has(mint)) {
+          logger.info(`[Eye] ⚠️ Duplicate create for ${mint.slice(0, 8)}... already tracked`);
+          return;
+        }
+        
+        // === STEP 2: Limit check - remove "dead" token (no buy after 3 min) ===
+        if (this.trackedTokens.size >= this.MAX_TRACKED_TOKENS) {
+          let deadToken: string | null = null;
+          let oldestDeadTime = now;
+          
+          this.trackedTokens.forEach((ts, m) => {
+            const launchTime = this.tokenLaunchTime.get(m) || ts;
+            const lastBuyTime = this.tokenLastBuyTime.get(m);
+            const ageMs = now - launchTime;
+            
+            // Token is "dead" if:
+            // 1. Has 0 buys (no lastBuyTime) AND age > 3 min, OR
+            // 2. Last buy was > 3 min ago
+            const isDead = ageMs >= this.TOKEN_DEAD_AFTER_MS && (
+              !lastBuyTime || (now - lastBuyTime) >= this.TOKEN_DEAD_AFTER_MS
+            );
+            
+            if (isDead && ts < oldestDeadTime) {
+              oldestDeadTime = ts;
+              deadToken = m;
+            }
+          });
+          
+          if (!deadToken) {
+            logger.warn(`[Eye] ⚠️ All tokens active (have buyers), skip new token`);
+            return;
+          }
+          
+          const tokenToReplace = deadToken as string;
+          const buyCount = this.tokenBuyCounter.get(tokenToReplace) || 0;
+          this.unsubscribeTokenTrade(tokenToReplace);
+          this.trackedTokens.delete(tokenToReplace);
+          this.tokenBuyCounter.delete(tokenToReplace);
+          this.tokenLaunchTime.delete(tokenToReplace);
+          this.tokenCreators.delete(tokenToReplace);
+          this.tokenLastBuyTime.delete(tokenToReplace);
+          logger.info(`[Eye] ♻️ Replaced dead token: ${tokenToReplace.slice(0, 12)}... (${buyCount} buys, ${this.MAX_TRACKED_TOKENS})`);
+        }
+        
+        // === STEP 3: Subscribe to new token + save creator ===
         this.subscribeTokenTrade(mint);
         this.trackedTokens.set(mint, now);
         this.tokenBuyCounter.set(mint, 0);
         this.tokenLaunchTime.set(mint, now);
-        logger.info(`[Eye] 🆕 New token: ${mint.slice(0, 12)}... | Mcap: ${mcap.toFixed(1)} SOL | ${CONFIG.SNIPER_WINDOW_SECONDS}s sniper | Tracked: ${this.trackedTokens.size}/${this.MAX_TRACKED_TOKENS}`);
+        
+        // Save token creator (for deployer skip - like ParasiteCombine)
+        const creator = parsed.traderPublicKey || parsed.trader || parsed.user || parsed.account;
+        if (creator) {
+          this.tokenCreators.set(mint, creator as string);
+        }
+        
+        logger.info(`[Eye] 🆕 New token: ${mint.slice(0, 12)}... | Mcap: ${mcap.toFixed(1)} SOL | Tracked: ${this.trackedTokens.size}/${this.MAX_TRACKED_TOKENS}`);
         return;
       }
       
-      // === STEP 3: Handle 'buy' event → Time skip + Bundle detection + Whale detection ===
+      // === STEP 3: Handle 'buy' event → Deployer skip + Bundle detection + Whale detection ===
       if (txType === 'buy' && mint) {
         const solAmount = parseFloat(parsed.solAmount as string || parsed.initialBuy as string || '0');
-        const trader = parsed.trader || parsed.user || parsed.account || 'unknown';
+        const trader = parsed.traderPublicKey || parsed.trader || parsed.user || parsed.account || 'unknown';
         const now = Date.now();
         
+        logger.info(`[Eye] 🛒 RAW BUY: mint=${mint.slice(0,12)} sol=${solAmount.toFixed(4)} trader=${(trader as string).slice(0,8)}`);
+        
         // Only process tracked tokens
-        if (!this.trackedTokens.has(mint)) return;
+        if (!this.trackedTokens.has(mint)) {
+          logger.info(`[Eye] ⛔ SKIP: Token ${mint.slice(0,12)} NOT in tracked tokens`);
+          return;
+        }
+        logger.info(`[Eye] ✅ Token ${mint.slice(0,12)} IS tracked`);
+        
+        // === DEPLOYER SKIP: Skip creator buys (like ParasiteCombine) ===
+        const creator = this.tokenCreators.get(mint);
+        logger.info(`[Eye] 🔍 Deployer check: creator=${creator?.slice(0,8)} vs trader=${(trader as string).slice(0,8)}`);
+        if (creator && creator === trader) {
+          logger.info(`[Eye] ⛔ CREATOR BUY SKIPPED: ${(trader as string).slice(0, 8)}...`);
+          return;
+        }
         
         // Check: Wallet blacklisted (previous sniper bundle)?
         if (this.blacklistedWallets.has(trader as string)) {
-          logger.debug(`[Eye] ⛔ Blacklisted wallet skipped: ${(trader as string).slice(0, 8)}...`);
+          logger.info(`[Eye] ⛔ BLACKLISTED WALLET SKIPPED: ${(trader as string).slice(0, 8)}...`);
           return;
         }
         
@@ -277,18 +355,10 @@ export class Eye extends EventEmitter {
         // Increment buy counter
         const currentCount = (this.tokenBuyCounter.get(mint) || 0) + 1;
         this.tokenBuyCounter.set(mint, currentCount);
+        logger.info(`[Eye] 📊 Buy counter: ${currentCount} for ${mint.slice(0,12)}`);
         
-        // === TIME-BASED SKIP: First X seconds from launch (sniper protection) ===
-        const launchTime = this.tokenLaunchTime.get(mint) || 0;
-        const secondsSinceLaunch = (now - launchTime) / 1000;
-        if (secondsSinceLaunch < CONFIG.SNIPER_WINDOW_SECONDS) {
-          if (this.msgCount <= 100 || currentCount <= 10) {
-            logger.info(`[Eye] ⏱️  Skipping buy #${currentCount} (${secondsSinceLaunch.toFixed(1)}s, ${solAmount.toFixed(3)} SOL) on ${mint.slice(0,8)}...`);
-          }
-          // Still add to recent buys for bundle detection
-          this.addToRecentBuys(mint, trader as string, solAmount, now);
-          return;
-        }
+        // Track last buy time (for dead token detection)
+        this.tokenLastBuyTime.set(mint, now);
         
         // === ENHANCED BUNDLE DETECTION: Time + Connected Wallet Check ===
         const bundleCheck = await this.detectEnhancedBundle(mint, solAmount, now, trader as string);
@@ -317,12 +387,22 @@ export class Eye extends EventEmitter {
         // Add to recent buys for future bundle detection
         this.addToRecentBuys(mint, trader as string, solAmount, now);
         
-        // === WHALE BUY DETECTION: After sniper window with >= MIN_INANG_BUY_SOL ===
-        if (solAmount >= CONFIG.MIN_INANG_BUY_SOL) {
-          logger.info(`[Eye] 🐋 WHALE BUY #${currentCount}: ${solAmount.toFixed(3)} SOL on ${mint.slice(0, 12)}... | ${secondsSinceLaunch.toFixed(0)}s after launch`);
+        // === SKIP FIRST N BUYS: Buyer #1-10 skipped (anti sniper) ===
+        logger.info(`[Eye] 🔢 Skip check: buy #${currentCount} <= ${this.SKIP_FIRST_N_BUYS}?`);
+        if (currentCount <= this.SKIP_FIRST_N_BUYS) {
+          logger.info(`[Eye] ⏭️  SKIPPING BUY #${currentCount}/${this.SKIP_FIRST_N_BUYS}: Anti-sniper protection`);
+          return;
+        }
+        
+        // === WHALE BUY DETECTION: >= MIN_INANG_BUY_SOL (0.1 SOL) ===
+        logger.info(`[Eye] 🐋 Whale check: ${solAmount.toFixed(4)} SOL vs threshold ${CONFIG.MIN_INANG_BUY_SOL}`);
+        if (solAmount >= CONFIG.MIN_INANG_BUY_SOL && solAmount <= CONFIG.MAX_INANG_BUY_SOL) {
+          logger.info(`[Eye] 🐋 WHALE BUY #${currentCount}: ${solAmount.toFixed(3)} SOL on ${mint.slice(0, 12)}... by ${(trader as string).slice(0, 8)}...`);
           this.stats.pumpingTrades++;
           const trade = this.parseTrade(parsed);
           if (trade) this.processTrade(trade);
+        } else {
+          logger.info(`[Eye] ⏭️  SKIP WHALE: Amount ${solAmount.toFixed(4)} outside range [${CONFIG.MIN_INANG_BUY_SOL}, ${CONFIG.MAX_INANG_BUY_SOL}]`);
         }
         return;
       }
@@ -495,13 +575,17 @@ export class Eye extends EventEmitter {
    * Subscribe to tokenTrade events for a specific mint
    */
   private subscribeTokenTrade(mint: string): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      logger.warn(`[Eye] ⚠️ Cannot subscribe ${mint.slice(0, 8)}... WS not open`);
+      return;
+    }
 
     const msg = {
       method: 'subscribeTokenTrade',
       keys: [mint],
     };
     this.ws.send(JSON.stringify(msg));
+    logger.info(`[Eye] 📡 Subscribing to trades for ${mint.slice(0, 12)}...`);
   }
 
   /**
@@ -539,6 +623,8 @@ export class Eye extends EventEmitter {
       this.trackedTokens.delete(mint);
       this.tokenBuyCounter.delete(mint);        // FIX #2: Clear counter
       this.tokenLaunchTime.delete(mint);        // FIX #2: Clear launch time
+      this.tokenCreators.delete(mint);          // Clear creator
+      this.tokenLastBuyTime.delete(mint);       // Clear last buy time
     }
 
     if (expired.length > 0) {
@@ -615,6 +701,15 @@ export class Eye extends EventEmitter {
     while (history.length > 10) {
       history.shift();
     }
+  }
+
+  /**
+   * Get latest market cap for a token (for copy-buy validation)
+   */
+  public getTokenMcap(mint: string): number {
+    const history = this.tokenMcapHistory.get(mint);
+    if (!history || history.length === 0) return 0;
+    return history[history.length - 1].mcap;
   }
 
   /**
@@ -732,6 +827,8 @@ export class Eye extends EventEmitter {
       this.trackedTokens.delete(oldest);
       this.tokenBuyCounter.delete(oldest);      // FIX #4: Clear counter
       this.tokenLaunchTime.delete(oldest);      // FIX #4: Clear launch time
+      this.tokenCreators.delete(oldest);        // Clear creator
+      this.tokenLastBuyTime.delete(oldest);     // Clear last buy time
       logger.info(`[Eye] 🧹 Unsubscribed from old token: ${oldest.slice(0, 12)}...`);
     }
 
