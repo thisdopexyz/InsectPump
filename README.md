@@ -22,6 +22,13 @@ High-performance Solana trading bot untuk Pump.fun dengan 4-stage filtering syst
   - Priority fee management (dynamic)
   - Telegram notifications
 
+- **DEX Execution Routes:**
+  - Pump.fun bonding curve via PumpPortal
+  - Pump AMM / PumpSwap via PumpPortal
+  - Raydium native AMM V4 / CPMM via Raydium SDK
+  - Meteora native DLMM via Meteora SDK
+  - Raydium PumpPortal fallback kalau native route gagal
+
 ## Prerequisites
 
 Sebelum install, pastikan punya:
@@ -58,10 +65,13 @@ Ini akan install semua dependencies:
 
 **Core Dependencies:**
 - `@coral-xyz/anchor` ^0.29.0 - Solana program framework
+- `@meteora-ag/dlmm` - Meteora DLMM native swap SDK
+- `@raydium-io/raydium-sdk-v2` - Raydium AMM/CPMM native swap SDK
 - `@solana/spl-token` ^0.3.9 - Token operations
 - `@solana/web3.js` ^1.87.6 - Solana RPC client
 - `axios` ^1.6.2 - HTTP client untuk API calls
 - `better-sqlite3` ^9.4.3 - Database local (SQLite)
+- `bn.js` - Big number math untuk native DEX SDK
 - `bs58` ^5.0.0 - Base58 encoding untuk private key
 - `dotenv` ^16.3.1 - Environment variables
 - `p-limit` ^5.0.0 - Concurrency limiter
@@ -249,6 +259,9 @@ InsectPump/
 │   │   └── analyzer.ts         # L3/L4: Helius analysis
 │   ├── execution/
 │   │   ├── tradeEngine.ts      # Buy/sell execution
+│   │   ├── raydiumNative.ts    # Native Raydium AMM/CPMM swaps
+│   │   ├── meteoraNative.ts    # Native Meteora DLMM swaps
+│   │   ├── nativeTypes.ts      # Shared native swap types
 │   │   └── walletManager.ts    # Wallet operations
 │   ├── monitoring/
 │   │   ├── inangMonitor.ts     # Whale tracking

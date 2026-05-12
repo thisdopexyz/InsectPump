@@ -27,6 +27,8 @@ import { logger } from '../utils/logger';
 import { TradeBase } from '../database/tradeBase';
 import { priceService } from '../services/priceService';
 import { initDynamicFeeService, DynamicFeeService } from './dynamicFee';
+import { executeRaydiumNativeSwap } from './raydiumNative';
+import { executeMeteoraNativeSwap } from './meteoraNative';
 
 // ---------------------------------------------------------------------------
 // Pump.fun IDL (Sell only)
@@ -44,7 +46,7 @@ interface TradeResult {
   txHash?: string;
   error?: string;
   slippageUsed?: number;
-  route?: 'pump_portal' | 'pump_amm' | 'raydium' | 'none';
+  route?: 'pump_portal' | 'pump_amm' | 'raydium' | 'raydium_native' | 'meteora_native' | 'none';
 }
 
 // PumpPortal API Constants
@@ -259,8 +261,24 @@ export class TradeEngine {
       return { ...ammResult, route: 'pump_amm' };
     }
 
-    // Try 3: Raydium via PumpPortal
-    logger.info(`[Buy] Pump AMM failed, trying Raydium via PumpPortal...`);
+    // Try 3: Raydium native SDK (AMM V4 / CPMM)
+    logger.info(`[Buy] Pump AMM failed -> trying Raydium native...`);
+    const raydiumNativeResult = await this.executeRaydiumNativeBuy(mint, amountSol);
+    if (raydiumNativeResult.success && raydiumNativeResult.txHash) {
+      await this.recordBuyPosition(mint, tokenSymbol, inangAddress, amountSol, raydiumNativeResult.txHash);
+      return { ...raydiumNativeResult, route: 'raydium_native' };
+    }
+
+    // Try 4: Meteora native DLMM
+    logger.info(`[Buy] Raydium native failed -> trying Meteora native...`);
+    const meteoraNativeResult = await this.executeMeteoraNativeBuy(mint, amountSol);
+    if (meteoraNativeResult.success && meteoraNativeResult.txHash) {
+      await this.recordBuyPosition(mint, tokenSymbol, inangAddress, amountSol, meteoraNativeResult.txHash);
+      return { ...meteoraNativeResult, route: 'meteora_native' };
+    }
+
+    // Try 5: Raydium via PumpPortal fallback
+    logger.info(`[Buy] Native paths failed -> trying Raydium via PumpPortal...`);
     const raydiumResult = await this.executePumpPortalBuy(mint, amountSol, 'raydium');
     if (raydiumResult.success && raydiumResult.txHash) {
       await this.recordBuyPosition(mint, tokenSymbol, inangAddress, amountSol, raydiumResult.txHash);
@@ -323,8 +341,24 @@ export class TradeEngine {
       return { ...ammResult, route: 'pump_amm' };
     }
 
-    // Try 3: Raydium via PumpPortal
-    logger.info(`[Sell] Pump paths failed, trying Raydium via PumpPortal...`);
+    // Try 3: Raydium native SDK (AMM V4 / CPMM)
+    logger.info(`[Sell] Pump paths failed -> trying Raydium native...`);
+    const raydiumNativeResult = await this.executeRaydiumNativeSell(mint, sellAmount);
+    if (raydiumNativeResult.success && raydiumNativeResult.txHash) {
+      await this.recordSellPosition(mint, raydiumNativeResult.txHash, 'raydium_native_sell');
+      return { ...raydiumNativeResult, route: 'raydium_native' };
+    }
+
+    // Try 4: Meteora native DLMM
+    logger.info(`[Sell] Raydium native failed -> trying Meteora native...`);
+    const meteoraNativeResult = await this.executeMeteoraNativeSell(mint, sellAmount);
+    if (meteoraNativeResult.success && meteoraNativeResult.txHash) {
+      await this.recordSellPosition(mint, meteoraNativeResult.txHash, 'meteora_native_sell');
+      return { ...meteoraNativeResult, route: 'meteora_native' };
+    }
+
+    // Try 5: Raydium via PumpPortal fallback
+    logger.info(`[Sell] Native paths failed -> trying Raydium via PumpPortal...`);
     const raydiumResult = await this.executePumpPortalSell(mint, percentage, 'raydium');
     if (raydiumResult.success && raydiumResult.txHash) {
       await this.recordSellPosition(mint, raydiumResult.txHash, 'raydium_sell');
@@ -389,6 +423,100 @@ export class TradeEngine {
     }
 
     return { ...result, skipped: false };
+  }
+
+  // ==================== NATIVE DEX EXECUTION ====================
+
+  private async executeRaydiumNativeBuy(mint: string, amountSol: number): Promise<TradeResult> {
+    const priorityFee = await this.feeService.getRecommendedFee('high');
+    const result = await executeRaydiumNativeSwap({
+      connection: this.connection,
+      keypair: this.keypair,
+      slippageBps: this.slippageBps,
+      priorityFeeMicroLamports: priorityFee,
+      maxRetries: CONFIG.TX_SEND_MAX_RETRIES,
+      mint,
+      inputMint: CONSTANTS.WSOL_MINT,
+      outputMint: mint,
+      amountInRaw: Math.floor(amountSol * LAMPORTS_PER_SOL).toString(),
+    });
+
+    return {
+      success: result.success,
+      txHash: result.txHash,
+      error: result.error,
+      route: result.success ? 'raydium_native' : 'none',
+      slippageUsed: this.slippageBps / 100,
+    };
+  }
+
+  private async executeRaydiumNativeSell(mint: string, sellAmountRaw: anchor.BN): Promise<TradeResult> {
+    const priorityFee = await this.feeService.getRecommendedFee('urgent');
+    const result = await executeRaydiumNativeSwap({
+      connection: this.connection,
+      keypair: this.keypair,
+      slippageBps: 2500,
+      priorityFeeMicroLamports: priorityFee,
+      maxRetries: CONFIG.TX_SEND_MAX_RETRIES,
+      mint,
+      inputMint: mint,
+      outputMint: CONSTANTS.WSOL_MINT,
+      amountInRaw: sellAmountRaw.toString(),
+    });
+
+    return {
+      success: result.success,
+      txHash: result.txHash,
+      error: result.error,
+      route: result.success ? 'raydium_native' : 'none',
+      slippageUsed: 25 / 100,
+    };
+  }
+
+  private async executeMeteoraNativeBuy(mint: string, amountSol: number): Promise<TradeResult> {
+    const priorityFee = await this.feeService.getRecommendedFee('high');
+    const result = await executeMeteoraNativeSwap({
+      connection: this.connection,
+      keypair: this.keypair,
+      slippageBps: this.slippageBps,
+      priorityFeeMicroLamports: priorityFee,
+      maxRetries: CONFIG.TX_SEND_MAX_RETRIES,
+      mint,
+      inputMint: CONSTANTS.WSOL_MINT,
+      outputMint: mint,
+      amountInRaw: Math.floor(amountSol * LAMPORTS_PER_SOL).toString(),
+    });
+
+    return {
+      success: result.success,
+      txHash: result.txHash,
+      error: result.error,
+      route: result.success ? 'meteora_native' : 'none',
+      slippageUsed: this.slippageBps / 100,
+    };
+  }
+
+  private async executeMeteoraNativeSell(mint: string, sellAmountRaw: anchor.BN): Promise<TradeResult> {
+    const priorityFee = await this.feeService.getRecommendedFee('urgent');
+    const result = await executeMeteoraNativeSwap({
+      connection: this.connection,
+      keypair: this.keypair,
+      slippageBps: 2500,
+      priorityFeeMicroLamports: priorityFee,
+      maxRetries: CONFIG.TX_SEND_MAX_RETRIES,
+      mint,
+      inputMint: mint,
+      outputMint: CONSTANTS.WSOL_MINT,
+      amountInRaw: sellAmountRaw.toString(),
+    });
+
+    return {
+      success: result.success,
+      txHash: result.txHash,
+      error: result.error,
+      route: result.success ? 'meteora_native' : 'none',
+      slippageUsed: 25 / 100,
+    };
   }
 
   // ==================== PUMP PORTAL API EXECUTION ====================
